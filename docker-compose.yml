@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  matrix-claude-code:
+    build: .
+    restart: unless-stopped
+    environment:
+      # Mode selection
+      - MATRIX_MODE=${MATRIX_MODE:-appservice}
+
+      # Matrix configuration
+      - MATRIX_HOMESERVER=${MATRIX_HOMESERVER}
+      - MATRIX_USER_ID=${MATRIX_USER_ID:-}
+      - MATRIX_ACCESS_TOKEN=${MATRIX_ACCESS_TOKEN:-}
+      - MATRIX_DEVICE_ID=${MATRIX_DEVICE_ID:-}
+
+      # Application Service configuration
+      - AS_ID=${AS_ID:-claude-code-bridge}
+      - AS_REGISTRATION_PATH=${AS_REGISTRATION_PATH:-}
+      - AS_LISTEN_ADDRESS=${AS_LISTEN_ADDRESS:-:8080}
+      - AS_PUBLIC_URL=${AS_PUBLIC_URL:-}
+      - AS_HS_TOKEN=${AS_HS_TOKEN:-}
+      - AS_TOKEN=${AS_TOKEN:-}
+      - AS_SENDER_LOCALPART=${AS_SENDER_LOCALPART:-claude-bot}
+      - AS_HOMESERVER_DOMAIN=${AS_HOMESERVER_DOMAIN:-}
+
+      # Claude Code configuration
+      - CLAUDE_CODE_WORKING_DIR=${CLAUDE_CODE_WORKING_DIR:-/workspace}
+      - CLAUDE_CODE_MODEL=${CLAUDE_CODE_MODEL:-}
+      - CLAUDE_CODE_SYSTEM_PROMPT=${CLAUDE_CODE_SYSTEM_PROMPT:-}
+      - CLAUDE_CODE_PERMISSION_MODE=${CLAUDE_CODE_PERMISSION_MODE:-}
+
+      # Channel configuration
+      - CHANNEL_NAME=${CHANNEL_NAME:-matrix}
+      - CHANNEL_STDIO_MODE=${CHANNEL_STDIO_MODE:-false}
+
+      # Access control
+      - MATRIX_WHITELIST=${MATRIX_WHITELIST}
+    ports:
+      - "${AS_LISTEN_ADDRESS:-8080}:8080"
+    volumes:
+      # Mount registration file if using file-based config
+      - ${AS_REGISTRATION_PATH:-./registration.yaml}:/app/registration.yaml:ro
+      # Mount working directory for Claude Code
+      - ${CLAUDE_CODE_WORKING_DIR:-./workspace}:/workspace
+    networks:
+      - matrix-net
+
+networks:
+  matrix-net:
+    driver: bridge
