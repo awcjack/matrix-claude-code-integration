@@ -1,0 +1,31 @@
+{
+  "mode": "appservice",
+  "matrix": {
+    "homeserver": "https://matrix.example.com"
+  },
+  "appservice": {
+    "id": "claude-code-bridge",
+    "registration_path": "/path/to/registration.yaml",
+    "listen_address": ":8080",
+    "public_url": "http://your-server:8080",
+    "sender_localpart": "claude-bot",
+    "homeserver_domain": "matrix.example.com"
+  },
+  "claude_code": {
+    "working_directory": "/home/user/projects",
+    "model": "claude-sonnet-4-20250514",
+    "system_prompt": "",
+    "permission_mode": "default",
+    "max_turns": 0,
+    "allowed_tools": [],
+    "disallowed_tools": []
+  },
+  "channel": {
+    "name": "matrix",
+    "stdio_mode": false,
+    "http_port": 0
+  },
+  "whitelist": [
+    "@your-user:matrix.example.com"
+  ]
+}
