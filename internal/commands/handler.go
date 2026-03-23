@@ -85,7 +85,7 @@ Each thread maintains its own session context. Use !new to start fresh.
 **Available Models:**
 - claude-sonnet-4-6-20250514 (default, fast)
 - claude-opus-4-6-20250514 (most capable)
-- claude-haiku-3-5-20241022 (fastest)`
+- claude-haiku-4-5-20250514 (fastest)`
 
 	return &CommandResult{
 		Message:   help,
@@ -112,7 +112,7 @@ func (h *Handler) handleSetModel(ctx context.Context, roomID, threadID string, a
 Available models:
 - claude-sonnet-4-6-20250514 (recommended)
 - claude-opus-4-6-20250514
-- claude-haiku-3-5-20241022`,
+- claude-haiku-4-5-20250514`,
 			IsError:   true,
 			IsCommand: true,
 		}
@@ -126,8 +126,8 @@ Available models:
 		modelName = "claude-sonnet-4-6-20250514"
 	case "opus", "claude-opus", "opus-4", "opus-4.6":
 		modelName = "claude-opus-4-6-20250514"
-	case "haiku", "claude-haiku", "haiku-3.5":
-		modelName = "claude-haiku-3-5-20241022"
+	case "haiku", "claude-haiku", "haiku-4.5":
+		modelName = "claude-haiku-4-5-20250514"
 	}
 
 	// Ensure session exists
