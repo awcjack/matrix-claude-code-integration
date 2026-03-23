@@ -83,9 +83,11 @@ Simply send a message (without a command prefix) to chat with Claude Code.
 Each thread maintains its own session context. Use !new to start fresh.
 
 **Available Models:**
-- claude-sonnet-4-6-20250514 (default, fast)
-- claude-opus-4-6-20250514 (most capable)
-- claude-haiku-4-5-20250514 (fastest)`
+- sonnet (default, fast) - alias for latest Sonnet
+- opus (most capable) - alias for latest Opus
+- haiku (fastest) - alias for latest Haiku
+
+You can also use full model IDs like claude-sonnet-4-6-20250514`
 
 	return &CommandResult{
 		Message:   help,
@@ -109,10 +111,12 @@ func (h *Handler) handleSetModel(ctx context.Context, roomID, threadID string, a
 		return &CommandResult{
 			Message: `Usage: !model <model_name>
 
-Available models:
-- claude-sonnet-4-6-20250514 (recommended)
-- claude-opus-4-6-20250514
-- claude-haiku-4-5-20250514`,
+Available models (aliases):
+- sonnet (recommended, default)
+- opus (most capable)
+- haiku (fastest)
+
+Or use full model IDs like claude-sonnet-4-6-20250514`,
 			IsError:   true,
 			IsCommand: true,
 		}
@@ -120,15 +124,16 @@ Available models:
 
 	modelName := args[0]
 
-	// Normalize model names
+	// Normalize to Claude Code aliases (Claude Code resolves these to latest versions)
 	switch strings.ToLower(modelName) {
 	case "sonnet", "claude-sonnet", "sonnet-4", "sonnet-4.6":
-		modelName = "claude-sonnet-4-6-20250514"
+		modelName = "sonnet"
 	case "opus", "claude-opus", "opus-4", "opus-4.6":
-		modelName = "claude-opus-4-6-20250514"
-	case "haiku", "claude-haiku", "haiku-4.5":
-		modelName = "claude-haiku-4-5-20250514"
+		modelName = "opus"
+	case "haiku", "claude-haiku", "haiku-4", "haiku-4.5":
+		modelName = "haiku"
 	}
+	// Otherwise pass through as-is (allows full model IDs like claude-sonnet-4-6-20250514)
 
 	// Ensure session exists
 	h.sessionMgr.GetOrCreateSession(roomID, threadID)
