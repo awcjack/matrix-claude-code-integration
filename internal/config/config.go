@@ -83,7 +83,7 @@ type ClaudeCodeConfig struct {
 	// WorkingDirectory is the directory where Claude Code operates
 	WorkingDirectory string `json:"working_directory"`
 
-	// Model to use (e.g., "claude-sonnet-4-20250514", "claude-opus-4-20250514")
+	// Model to use (e.g., "claude-sonnet-4-6-20250514", "claude-opus-4-6-20250514")
 	Model string `json:"model,omitempty"`
 
 	// SystemPrompt is an optional system prompt prefix

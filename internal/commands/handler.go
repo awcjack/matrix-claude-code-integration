@@ -83,8 +83,8 @@ Simply send a message (without a command prefix) to chat with Claude Code.
 Each thread maintains its own session context. Use !new to start fresh.
 
 **Available Models:**
-- claude-sonnet-4-20250514 (default, fast)
-- claude-opus-4-20250514 (most capable)
+- claude-sonnet-4-6-20250514 (default, fast)
+- claude-opus-4-6-20250514 (most capable)
 - claude-haiku-3-5-20241022 (fastest)`
 
 	return &CommandResult{
@@ -110,8 +110,8 @@ func (h *Handler) handleSetModel(ctx context.Context, roomID, threadID string, a
 			Message: `Usage: !model <model_name>
 
 Available models:
-- claude-sonnet-4-20250514 (recommended)
-- claude-opus-4-20250514
+- claude-sonnet-4-6-20250514 (recommended)
+- claude-opus-4-6-20250514
 - claude-haiku-3-5-20241022`,
 			IsError:   true,
 			IsCommand: true,
@@ -122,10 +122,10 @@ Available models:
 
 	// Normalize model names
 	switch strings.ToLower(modelName) {
-	case "sonnet", "claude-sonnet", "sonnet-4":
-		modelName = "claude-sonnet-4-20250514"
-	case "opus", "claude-opus", "opus-4":
-		modelName = "claude-opus-4-20250514"
+	case "sonnet", "claude-sonnet", "sonnet-4", "sonnet-4.6":
+		modelName = "claude-sonnet-4-6-20250514"
+	case "opus", "claude-opus", "opus-4", "opus-4.6":
+		modelName = "claude-opus-4-6-20250514"
 	case "haiku", "claude-haiku", "haiku-3.5":
 		modelName = "claude-haiku-3-5-20241022"
 	}

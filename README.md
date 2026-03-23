@@ -139,7 +139,7 @@ See [.env.example](./.env.example) for all options.
   },
   "claude_code": {
     "working_directory": "/home/user/projects",
-    "model": "claude-sonnet-4-20250514"
+    "model": "claude-sonnet-4-6-20250514"
   },
   "whitelist": ["@your-user:matrix.example.com"]
 }
