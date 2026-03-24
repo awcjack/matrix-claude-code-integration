@@ -15,6 +15,7 @@ import (
 	"github.com/personal/matrix-claude-code-integration/internal/appservice"
 	"github.com/personal/matrix-claude-code-integration/internal/channel"
 	"github.com/personal/matrix-claude-code-integration/internal/config"
+	"github.com/personal/matrix-claude-code-integration/internal/ipc"
 	"github.com/personal/matrix-claude-code-integration/internal/matrix"
 )
 
@@ -87,26 +88,134 @@ func main() {
 }
 
 // runStdioMode runs as an MCP server for Claude Code --channels
+// It can receive messages via:
+// 1. IPC from Application Service mode (real-time push)
+// 2. Direct Matrix polling (fallback if no AS)
 func runStdioMode(ctx context.Context, cfg *config.Config) {
 	log.Println("Running in MCP stdio mode for Claude Code channels")
 
-	// Create MCP server
+	// Get socket path from config or use default
+	socketPath := cfg.IPC.SocketPath
+	if socketPath == "" {
+		socketPath = ipc.DefaultSocketPath()
+	}
+
+	// Determine if we should use IPC (AS mode running separately) or direct Matrix polling
+	useIPC := cfg.IPC.Enabled
+
+	var clientAdapter matrix.ClientAdapter
+	var matrixClient *mautrix.Client
+
+	// If not using IPC, we need Matrix credentials for direct polling
+	if !useIPC {
+		if cfg.Matrix.UserID == "" {
+			log.Fatal("Matrix user ID is required (MATRIX_USER_ID)")
+		}
+		if cfg.Matrix.AccessToken == "" {
+			log.Fatal("Matrix access token is required (MATRIX_ACCESS_TOKEN)")
+		}
+
+		log.Printf("Bot user ID: %s", cfg.Matrix.UserID)
+
+		// Create mautrix client for Matrix communication
+		userID := id.UserID(cfg.Matrix.UserID)
+		var err error
+		matrixClient, err = mautrix.NewClient(cfg.Matrix.Homeserver, userID, cfg.Matrix.AccessToken)
+		if err != nil {
+			log.Fatalf("Failed to create Matrix client: %v", err)
+		}
+
+		if cfg.Matrix.DeviceID != "" {
+			matrixClient.DeviceID = id.DeviceID(cfg.Matrix.DeviceID)
+		}
+
+		clientAdapter = matrix.NewBotClientAdapter(matrixClient)
+	}
+
+	// Create MCP server with reply handler
+	var handler *matrix.Handler
+	var ipcServer *ipc.Server
+
 	mcpServer := channel.NewMCPServer(
 		cfg.Channel.Name,
 		"1.0.0",
-		nil, // Reply handler will be set up with Matrix client
+		func(ctx context.Context, roomID, threadID, message string) error {
+			if useIPC {
+				// Send reply back via IPC to AS mode
+				if ipcServer != nil {
+					return ipcServer.BroadcastReply(&ipc.ReplyPayload{
+						RoomID:   roomID,
+						ThreadID: threadID,
+						Content:  message,
+					})
+				}
+				return nil
+			}
+			// Send reply directly to Matrix
+			if handler != nil {
+				return handler.HandleReply(ctx, roomID, threadID, message)
+			}
+			return nil
+		},
 	)
 
-	// For stdio mode, we need to handle Matrix separately
-	// This is a bridge mode where:
-	// 1. Claude Code spawns this as an MCP server
-	// 2. This server receives Matrix messages and pushes them as channel notifications
-	// 3. Claude's replies come back through the reply tool
+	// Create handler if using direct Matrix connection
+	if !useIPC {
+		handler = matrix.NewHandler(clientAdapter, mcpServer, cfg)
+	}
 
-	// In a full implementation, this would also start the Matrix client
-	// in a separate goroutine to receive messages
-	log.Printf("MCP Channel server ready. Waiting for messages...")
+	// Start IPC server if enabled
+	if useIPC {
+		ipcServer = ipc.NewServer(socketPath, func(ctx context.Context, event *ipc.MatrixEventPayload) {
+			// Forward event to MCP server (which notifies Claude Code)
+			log.Printf("IPC: Received event from AS mode, forwarding to Claude Code")
+			err := mcpServer.PushMessage(ctx, event.RoomID, event.ThreadID, event.Sender, event.Content)
+			if err != nil {
+				log.Printf("Failed to push message to MCP: %v", err)
+			}
+		})
 
+		go func() {
+			log.Printf("Starting IPC server on %s...", socketPath)
+			if err := ipcServer.Start(ctx); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("IPC server error: %v", err)
+				}
+			}
+		}()
+
+		log.Printf("MCP Channel server ready. Waiting for events via IPC...")
+	} else {
+		// Set up syncer for direct Matrix events
+		syncer := mautrix.NewDefaultSyncer()
+
+		syncer.OnEventType(event.EventMessage, func(ctx context.Context, evt *event.Event) {
+			asEvent := convertToASEvent(evt)
+			handler.HandleEvent(ctx, asEvent)
+		})
+
+		syncer.OnEventType(event.StateMember, func(ctx context.Context, evt *event.Event) {
+			asEvent := convertToASEvent(evt)
+			handler.HandleEvent(ctx, asEvent)
+		})
+
+		matrixClient.Syncer = syncer
+		matrixClient.Store = mautrix.NewMemorySyncStore()
+
+		// Start Matrix sync in background
+		go func() {
+			log.Println("Starting Matrix sync...")
+			if err := matrixClient.SyncWithContext(ctx); err != nil {
+				if ctx.Err() == nil {
+					log.Printf("Matrix sync error: %v", err)
+				}
+			}
+		}()
+
+		log.Printf("MCP Channel server ready. Listening for Matrix messages via polling...")
+	}
+
+	// Run MCP server (blocks until context is cancelled)
 	if err := mcpServer.Run(ctx); err != nil {
 		if ctx.Err() == nil {
 			log.Fatalf("MCP server error: %v", err)
@@ -115,8 +224,9 @@ func runStdioMode(ctx context.Context, cfg *config.Config) {
 }
 
 // runAppServiceMode runs the integration as a Matrix Application Service
+// Events are forwarded via IPC to the stdio mode (spawned by Claude Code)
 func runAppServiceMode(ctx context.Context, cfg *config.Config) {
-	log.Println("Running in Application Service mode")
+	log.Println("Running in Application Service mode with IPC")
 
 	// Load or use config tokens
 	var hsToken, asToken string
@@ -146,31 +256,39 @@ func runAppServiceMode(ctx context.Context, cfg *config.Config) {
 	log.Printf("Bot user ID: %s", botUserID)
 	log.Printf("AS listen address: %s", cfg.AppService.ListenAddress)
 
-	// Create AS client for sending messages
+	// Create AS client for sending messages back to Matrix
 	asClient := appservice.NewClient(cfg.Matrix.Homeserver, asToken, botUserID)
-
-	// Create adapter
 	clientAdapter := matrix.NewASClientAdapter(asClient)
 
-	// Create MCP server with reply handler
-	var handler *matrix.Handler
-	mcpServer := channel.NewMCPServer(
-		cfg.Channel.Name,
-		"1.0.0",
-		func(ctx context.Context, roomID, threadID, message string) error {
-			if handler != nil {
-				return handler.HandleReply(ctx, roomID, threadID, message)
-			}
-			return nil
-		},
-	)
+	// Get socket path from config or use default
+	socketPath := cfg.IPC.SocketPath
+	if socketPath == "" {
+		socketPath = ipc.DefaultSocketPath()
+	}
 
-	// Create handler
-	handler = matrix.NewHandler(clientAdapter, mcpServer, cfg)
+	// Create IPC client to forward events to stdio mode
+	ipcClient := ipc.NewClient(socketPath, func(ctx context.Context, reply *ipc.ReplyPayload) {
+		// Handle replies from stdio mode (forward to Matrix)
+		log.Printf("IPC: Received reply for room %s", reply.RoomID)
+		err := clientAdapter.SendMessage(ctx, reply.RoomID, reply.ThreadID, reply.Content)
+		if err != nil {
+			log.Printf("Failed to send reply to Matrix: %v", err)
+		}
+	})
+
+	// Connect to IPC server (stdio mode)
+	log.Printf("Connecting to IPC server at %s...", socketPath)
+	if err := ipcClient.Connect(ctx); err != nil {
+		log.Fatalf("Failed to connect to IPC server: %v", err)
+	}
+	defer ipcClient.Close()
+
+	// Create handler that forwards events via IPC
+	forwarder := &ipcForwarder{client: ipcClient, cfg: cfg}
 
 	// Create AS server
 	asServer := appservice.NewServer(hsToken, asToken, botUserID, func(ctx context.Context, event *appservice.Event) {
-		handler.HandleEvent(ctx, event)
+		forwarder.HandleEvent(ctx, event)
 	})
 
 	log.Printf("Application Service is running. Press Ctrl+C to stop.")
@@ -180,6 +298,56 @@ func runAppServiceMode(ctx context.Context, cfg *config.Config) {
 		if ctx.Err() == nil {
 			log.Fatalf("AS server error: %v", err)
 		}
+	}
+}
+
+// ipcForwarder forwards Matrix events to the stdio mode via IPC
+type ipcForwarder struct {
+	client *ipc.Client
+	cfg    *config.Config
+}
+
+func (f *ipcForwarder) HandleEvent(ctx context.Context, event *appservice.Event) {
+	// Only handle message events
+	if event.Type != "m.room.message" {
+		return
+	}
+
+	// Check whitelist
+	if !f.cfg.IsWhitelisted(event.Sender) {
+		log.Printf("Ignoring message from non-whitelisted user: %s", event.Sender)
+		return
+	}
+
+	// Extract message content
+	content, ok := event.Content["body"].(string)
+	if !ok || content == "" {
+		return
+	}
+
+	// Extract thread ID if present
+	var threadID string
+	if relatesTo, ok := event.Content["m.relates_to"].(map[string]interface{}); ok {
+		if rel, ok := relatesTo["rel_type"].(string); ok && rel == "m.thread" {
+			if evtID, ok := relatesTo["event_id"].(string); ok {
+				threadID = evtID
+			}
+		}
+	}
+
+	log.Printf("IPC: Forwarding message from %s to stdio mode", event.Sender)
+
+	// Forward to stdio mode via IPC
+	err := f.client.SendEvent(&ipc.MatrixEventPayload{
+		RoomID:    event.RoomID,
+		EventID:   event.EventID,
+		Sender:    event.Sender,
+		Content:   content,
+		ThreadID:  threadID,
+		Timestamp: event.OriginServerTS,
+	})
+	if err != nil {
+		log.Printf("Failed to forward event via IPC: %v", err)
 	}
 }
 
