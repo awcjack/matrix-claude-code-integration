@@ -25,13 +25,19 @@ type MatrixClient interface {
 	GetBotUserID() string
 }
 
+// ClaudeExecutor is an interface for executing Claude Code commands
+type ClaudeExecutor interface {
+	Execute(ctx context.Context, prompt string) (string, error)
+}
+
 // Handler handles Matrix events and coordinates with Claude Code via MCP channel
 type Handler struct {
-	client     MatrixClient
-	mcpServer  *channel.MCPServer
-	sessionMgr *session.Manager
-	cmdHandler *commands.Handler
-	cfg        *config.Config
+	client         MatrixClient
+	mcpServer      *channel.MCPServer
+	claudeExecutor ClaudeExecutor
+	sessionMgr     *session.Manager
+	cmdHandler     *commands.Handler
+	cfg            *config.Config
 
 	// Track messages being streamed
 	streamingMu   sync.Mutex
@@ -51,7 +57,7 @@ type StreamingMessage struct {
 	IsLive   bool // Whether the message is still streaming (MSC4357)
 }
 
-// NewHandler creates a new event handler
+// NewHandler creates a new event handler with MCP channel
 func NewHandler(client MatrixClient, mcpServer *channel.MCPServer, cfg *config.Config) *Handler {
 	sessionMgr := session.NewManager(
 		cfg.ClaudeCode.WorkingDirectory,
@@ -67,6 +73,25 @@ func NewHandler(client MatrixClient, mcpServer *channel.MCPServer, cfg *config.C
 		cfg:           cfg,
 		streamingMsgs: make(map[string]*StreamingMessage),
 		startTime:     time.Now(),
+	}
+}
+
+// NewHandlerWithExecutor creates a new event handler with Claude executor (for AS mode)
+func NewHandlerWithExecutor(client MatrixClient, executor ClaudeExecutor, cfg *config.Config) *Handler {
+	sessionMgr := session.NewManager(
+		cfg.ClaudeCode.WorkingDirectory,
+		cfg.ClaudeCode.Model,
+		cfg.ClaudeCode.SystemPrompt,
+	)
+
+	return &Handler{
+		client:         client,
+		claudeExecutor: executor,
+		sessionMgr:     sessionMgr,
+		cmdHandler:     commands.NewHandler(sessionMgr),
+		cfg:            cfg,
+		streamingMsgs:  make(map[string]*StreamingMessage),
+		startTime:      time.Now(),
 	}
 }
 
@@ -155,7 +180,7 @@ func (h *Handler) handleMemberEvent(ctx context.Context, event *appservice.Event
 	}
 }
 
-// handleClaudeCodeMessage pushes a message to Claude Code via the MCP channel
+// handleClaudeCodeMessage sends a message to Claude Code and handles the response
 func (h *Handler) handleClaudeCodeMessage(ctx context.Context, roomID, threadID, eventID, sender, message string) {
 	// Get or create session
 	sess := h.sessionMgr.GetOrCreateSession(roomID, threadID)
@@ -164,7 +189,34 @@ func (h *Handler) handleClaudeCodeMessage(ctx context.Context, roomID, threadID,
 	// Send typing indicator
 	h.client.SetTyping(ctx, roomID, true, 30000)
 
-	// Push the message to Claude Code via MCP channel notification
+	// Use Claude executor if available (synchronous mode - deprecated)
+	if h.claudeExecutor != nil {
+		response, err := h.claudeExecutor.Execute(ctx, message)
+		if err != nil {
+			log.Printf("Claude Code execution error: %v", err)
+			h.sendReply(ctx, roomID, threadID, eventID,
+				"Claude Code error: "+err.Error(), true)
+			h.client.SetTyping(ctx, roomID, false, 0)
+			return
+		}
+
+		// Send the response back to Matrix
+		h.client.SetTyping(ctx, roomID, false, 0)
+		if err := h.HandleReply(ctx, roomID, threadID, response); err != nil {
+			log.Printf("Failed to send reply: %v", err)
+		}
+		return
+	}
+
+	// MCP channel mode: Push the message to Claude Code via MCP channel notification
+	if h.mcpServer == nil {
+		log.Printf("No Claude executor or MCP server configured")
+		h.sendReply(ctx, roomID, threadID, eventID,
+			"Claude Code is not configured", true)
+		h.client.SetTyping(ctx, roomID, false, 0)
+		return
+	}
+
 	if err := h.mcpServer.PushMessage(roomID, threadID, sender, eventID, message); err != nil {
 		log.Printf("Failed to push message to Claude Code: %v", err)
 		h.sendReply(ctx, roomID, threadID, eventID,
