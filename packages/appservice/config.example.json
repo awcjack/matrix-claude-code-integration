@@ -1,0 +1,28 @@
+{
+  "matrix": {
+    "homeserver": "https://matrix.example.com",
+    "appservice": {
+      "registration_path": "/etc/matrix-claude/registration.yaml",
+      "listen_address": ":8080",
+      "hs_token": "YOUR_HS_TOKEN_HERE",
+      "as_token": "YOUR_AS_TOKEN_HERE",
+      "bot_user_id": "@claude-bot:matrix.example.com"
+    }
+  },
+  "sessions": {
+    "working_directory": "/workspace",
+    "model": "claude-sonnet-4-6-20250514",
+    "system_prompt": "",
+    "max_concurrent": 10,
+    "idle_timeout": "30m"
+  },
+  "ipc": {
+    "socket_path": "/tmp/matrix-claude.sock"
+  },
+  "bridge": {
+    "path": "matrix-bridge"
+  },
+  "whitelist": [
+    "@user:matrix.example.com"
+  ]
+}
