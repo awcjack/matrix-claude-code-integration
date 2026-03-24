@@ -34,6 +34,19 @@ type Config struct {
 
 	// Channel settings
 	Channel ChannelConfig `json:"channel"`
+
+	// IPC settings for communication between AS mode and stdio mode
+	IPC IPCConfig `json:"ipc"`
+}
+
+// IPCConfig holds IPC (inter-process communication) settings
+type IPCConfig struct {
+	// Enabled enables IPC mode in stdio (receives events from AS via Unix socket)
+	Enabled bool `json:"enabled"`
+
+	// SocketPath is the path to the Unix socket
+	// Default: /tmp/matrix-claude-code.sock or $XDG_RUNTIME_DIR/matrix-claude-code.sock
+	SocketPath string `json:"socket_path"`
 }
 
 // MatrixConfig holds Matrix-specific configuration
@@ -101,6 +114,9 @@ type ClaudeCodeConfig struct {
 	// PermissionMode controls permission behavior
 	// Options: "default", "plan", "auto-approve"
 	PermissionMode string `json:"permission_mode,omitempty"`
+
+	// BinaryPath is the path to the Claude Code binary (default: "claude")
+	BinaryPath string `json:"binary_path,omitempty"`
 }
 
 // ChannelConfig holds MCP channel server settings
@@ -113,6 +129,10 @@ type ChannelConfig struct {
 
 	// HTTPPort for standalone HTTP webhook receiver mode
 	HTTPPort int `json:"http_port,omitempty"`
+
+	// IPCSocketPath is the path to the Unix socket for IPC between AS relay and stdio mode
+	// Default: /tmp/matrix-claude-code.sock
+	IPCSocketPath string `json:"ipc_socket_path,omitempty"`
 }
 
 // Load reads configuration from a JSON file
@@ -160,11 +180,17 @@ func LoadFromEnv() *Config {
 			Model:            os.Getenv("CLAUDE_CODE_MODEL"),
 			SystemPrompt:     os.Getenv("CLAUDE_CODE_SYSTEM_PROMPT"),
 			PermissionMode:   os.Getenv("CLAUDE_CODE_PERMISSION_MODE"),
+			BinaryPath:       os.Getenv("CLAUDE_CODE_BINARY_PATH"),
 		},
 		Channel: ChannelConfig{
-			Name:      getEnvDefault("CHANNEL_NAME", "matrix"),
-			StdioMode: os.Getenv("CHANNEL_STDIO_MODE") == "true",
-			HTTPPort:  parseIntDefault(os.Getenv("CHANNEL_HTTP_PORT"), 0),
+			Name:          getEnvDefault("CHANNEL_NAME", "matrix"),
+			StdioMode:     os.Getenv("CHANNEL_STDIO_MODE") == "true",
+			HTTPPort:      parseIntDefault(os.Getenv("CHANNEL_HTTP_PORT"), 0),
+			IPCSocketPath: getEnvDefault("CHANNEL_IPC_SOCKET_PATH", "/tmp/matrix-claude-code.sock"),
+		},
+		IPC: IPCConfig{
+			Enabled:    os.Getenv("IPC_ENABLED") == "true",
+			SocketPath: getEnvDefault("IPC_SOCKET_PATH", "/tmp/matrix-claude-code.sock"),
 		},
 		Whitelist: parseWhitelist(os.Getenv("MATRIX_WHITELIST")),
 	}
@@ -343,4 +369,9 @@ func (c *Config) IsUserWhitelisted(userID string) bool {
 		}
 	}
 	return false
+}
+
+// IsWhitelisted is an alias for IsUserWhitelisted
+func (c *Config) IsWhitelisted(userID string) bool {
+	return c.IsUserWhitelisted(userID)
 }
