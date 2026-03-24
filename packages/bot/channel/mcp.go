@@ -22,6 +22,9 @@ type MCPServer struct {
 	// Callbacks for reply handling
 	replyHandler ReplyHandler
 
+	// Callback for permission requests
+	permissionHandler PermissionHandler
+
 	// Message queue for sending notifications
 	notifyMu     sync.Mutex
 	notifyChan   chan *Notification
@@ -38,6 +41,24 @@ type MCPServer struct {
 
 // ReplyHandler is called when Claude replies through the channel
 type ReplyHandler func(ctx context.Context, roomID, threadID, message string) error
+
+// PermissionHandler is called when Claude Code requests permission to run a tool
+// Returns true to allow, false to deny
+type PermissionHandler func(ctx context.Context, req *PermissionRequest) (bool, error)
+
+// PermissionRequest represents a permission request from Claude Code
+type PermissionRequest struct {
+	RequestID    string `json:"request_id"`
+	ToolName     string `json:"tool_name"`
+	Description  string `json:"description"`
+	InputPreview string `json:"input_preview"`
+}
+
+// PermissionVerdict represents the response to send back to Claude Code
+type PermissionVerdict struct {
+	RequestID string `json:"request_id"`
+	Behavior  string `json:"behavior"` // "allow" or "deny"
+}
 
 // Notification represents a channel notification to send to Claude Code
 type Notification struct {
@@ -120,23 +141,24 @@ type InputSchema struct {
 }
 
 // NewMCPServer creates a new MCP server for the Matrix channel using stdin/stdout
-func NewMCPServer(name, version string, replyHandler ReplyHandler) *MCPServer {
-	return NewMCPServerWithIO(name, version, replyHandler, os.Stdin, os.Stdout)
+func NewMCPServer(name, version string, replyHandler ReplyHandler, permissionHandler PermissionHandler) *MCPServer {
+	return NewMCPServerWithIO(name, version, replyHandler, permissionHandler, os.Stdin, os.Stdout)
 }
 
 // NewMCPServerWithIO creates a new MCP server for the Matrix channel with custom IO
-func NewMCPServerWithIO(name, version string, replyHandler ReplyHandler, reader io.Reader, writer io.Writer) *MCPServer {
+func NewMCPServerWithIO(name, version string, replyHandler ReplyHandler, permissionHandler PermissionHandler, reader io.Reader, writer io.Writer) *MCPServer {
 	return &MCPServer{
 		name:    name,
 		version: version,
 		instructions: `Messages from Matrix arrive as <channel source="matrix" room_id="..." sender="..." thread_id="...">.
 Reply to Matrix messages using the 'reply' tool, passing the room_id and optionally thread_id from the original message.
 Each Matrix thread maintains context - replies in threads should reference the thread_id.`,
-		replyHandler: replyHandler,
-		notifyChan:   make(chan *Notification, 100),
-		replyResults: make(map[int]chan *ToolResult),
-		reader:       bufio.NewReader(reader),
-		writer:       writer,
+		replyHandler:      replyHandler,
+		permissionHandler: permissionHandler,
+		notifyChan:        make(chan *Notification, 100),
+		replyResults:      make(map[int]chan *ToolResult),
+		reader:            bufio.NewReader(reader),
+		writer:            writer,
 	}
 }
 
@@ -191,6 +213,8 @@ func (s *MCPServer) handleRequest(ctx context.Context, req *MCPRequest) {
 		s.handleCallTool(ctx, req)
 	case "ping":
 		s.sendResponse(req.ID, map[string]interface{}{})
+	case "notifications/claude/channel/permission_request":
+		s.handlePermissionRequest(ctx, req)
 	default:
 		log.Printf("Unknown method: %s", req.Method)
 	}
@@ -206,7 +230,8 @@ func (s *MCPServer) handleInitialize(req *MCPRequest) {
 		},
 		Capabilities: Capabilities{
 			Experimental: map[string]interface{}{
-				"claude/channel": map[string]interface{}{},
+				"claude/channel":            map[string]interface{}{},
+				"claude/channel/permission": map[string]interface{}{},
 			},
 			Tools: map[string]interface{}{},
 		},
@@ -300,6 +325,42 @@ func (s *MCPServer) handleReplyTool(ctx context.Context, req *MCPRequest, args j
 	s.sendResponse(req.ID, ToolResult{
 		Content: []ContentPart{{Type: "text", Text: "sent"}},
 	})
+}
+
+// handlePermissionRequest processes permission requests from Claude Code
+func (s *MCPServer) handlePermissionRequest(ctx context.Context, req *MCPRequest) {
+	var permReq PermissionRequest
+	if err := json.Unmarshal(req.Params, &permReq); err != nil {
+		log.Printf("Invalid permission request: %v", err)
+		return
+	}
+
+	log.Printf("Permission request: id=%s tool=%s desc=%s",
+		permReq.RequestID, permReq.ToolName, permReq.Description)
+
+	// Call the permission handler (will be provided by Matrix integration)
+	allowed := false
+	if s.permissionHandler != nil {
+		var err error
+		allowed, err = s.permissionHandler(ctx, &permReq)
+		if err != nil {
+			log.Printf("Permission handler error: %v", err)
+			// Default to deny on error
+		}
+	}
+
+	// Send verdict back to Claude Code
+	behavior := "deny"
+	if allowed {
+		behavior = "allow"
+	}
+
+	s.sendNotification("notifications/claude/channel/permission", map[string]interface{}{
+		"request_id": permReq.RequestID,
+		"behavior":   behavior,
+	})
+
+	log.Printf("Permission verdict sent: id=%s behavior=%s", permReq.RequestID, behavior)
 }
 
 // PushMessage sends a notification to Claude Code about a new Matrix message

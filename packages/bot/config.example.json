@@ -1,0 +1,18 @@
+{
+  "matrix": {
+    "homeserver": "https://matrix.org",
+    "user_id": "@claude-bot:matrix.org",
+    "access_token": "YOUR_ACCESS_TOKEN"
+  },
+  "channel": {
+    "name": "matrix",
+    "stdio_mode": true
+  },
+  "claude_code": {
+    "working_directory": "/workspace",
+    "model": "claude-sonnet-4-6-20250514"
+  },
+  "whitelist": [
+    "@user:matrix.org"
+  ]
+}

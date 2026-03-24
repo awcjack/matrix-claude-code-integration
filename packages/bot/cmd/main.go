@@ -12,10 +12,9 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
-	"github.com/personal/matrix-claude-code-integration/internal/appservice"
-	"github.com/personal/matrix-claude-code-integration/internal/channel"
-	"github.com/personal/matrix-claude-code-integration/internal/config"
-	"github.com/personal/matrix-claude-code-integration/internal/matrix"
+	"github.com/anthropics/matrix-claude-code/bot/channel"
+	"github.com/anthropics/matrix-claude-code/bot/config"
+	"github.com/anthropics/matrix-claude-code/bot/matrix"
 )
 
 func main() {
@@ -101,7 +100,7 @@ func runStdioMode(ctx context.Context, cfg *config.Config) {
 
 	clientAdapter := matrix.NewBotClientAdapter(matrixClient)
 
-	// Create MCP server with reply handler
+	// Create MCP server with reply handler and permission handler
 	var handler *matrix.Handler
 
 	mcpServer := channel.NewMCPServer(
@@ -114,6 +113,13 @@ func runStdioMode(ctx context.Context, cfg *config.Config) {
 			}
 			return nil
 		},
+		func(ctx context.Context, req *channel.PermissionRequest) (bool, error) {
+			// Handle permission request from Claude Code
+			if handler != nil {
+				return handler.HandlePermissionRequest(ctx, req)
+			}
+			return false, nil
+		},
 	)
 
 	// Create handler
@@ -123,12 +129,12 @@ func runStdioMode(ctx context.Context, cfg *config.Config) {
 	syncer := mautrix.NewDefaultSyncer()
 
 	syncer.OnEventType(event.EventMessage, func(ctx context.Context, evt *event.Event) {
-		asEvent := convertToASEvent(evt)
+		asEvent := convertToMatrixEvent(evt)
 		handler.HandleEvent(ctx, asEvent)
 	})
 
 	syncer.OnEventType(event.StateMember, func(ctx context.Context, evt *event.Event) {
-		asEvent := convertToASEvent(evt)
+		asEvent := convertToMatrixEvent(evt)
 		handler.HandleEvent(ctx, asEvent)
 	})
 
@@ -186,6 +192,13 @@ func runBotMode(ctx context.Context, cfg *config.Config) {
 			}
 			return nil
 		},
+		func(ctx context.Context, req *channel.PermissionRequest) (bool, error) {
+			// Handle permission request from Claude Code
+			if handler != nil {
+				return handler.HandlePermissionRequest(ctx, req)
+			}
+			return false, nil
+		},
 	)
 
 	// Create handler
@@ -196,13 +209,13 @@ func runBotMode(ctx context.Context, cfg *config.Config) {
 
 	// Handle message events
 	syncer.OnEventType(event.EventMessage, func(ctx context.Context, evt *event.Event) {
-		asEvent := convertToASEvent(evt)
+		asEvent := convertToMatrixEvent(evt)
 		handler.HandleEvent(ctx, asEvent)
 	})
 
 	// Handle member events (for invites)
 	syncer.OnEventType(event.StateMember, func(ctx context.Context, evt *event.Event) {
-		asEvent := convertToASEvent(evt)
+		asEvent := convertToMatrixEvent(evt)
 		handler.HandleEvent(ctx, asEvent)
 	})
 
@@ -219,15 +232,15 @@ func runBotMode(ctx context.Context, cfg *config.Config) {
 	}
 }
 
-// convertToASEvent converts a mautrix event to appservice.Event format
-func convertToASEvent(evt *event.Event) *appservice.Event {
+// convertToMatrixEvent converts a mautrix event to matrix.Event format
+func convertToMatrixEvent(evt *event.Event) *matrix.Event {
 	var stateKey *string
 	if evt.StateKey != nil {
 		sk := *evt.StateKey
 		stateKey = &sk
 	}
 
-	return &appservice.Event{
+	return &matrix.Event{
 		EventID:        string(evt.ID),
 		RoomID:         string(evt.RoomID),
 		Sender:         string(evt.Sender),

@@ -172,3 +172,15 @@ func (m *Manager) GetDefaultModel() string {
 func (m *Manager) GetDefaultWorkingDirectory() string {
 	return m.defaultWorkingDir
 }
+
+// GetActiveSessions returns all active sessions
+func (m *Manager) GetActiveSessions() []*UserSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*UserSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		result = append(result, session)
+	}
+	return result
+}

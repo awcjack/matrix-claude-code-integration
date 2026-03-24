@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/personal/matrix-claude-code-integration/internal/session"
+	"github.com/anthropics/matrix-claude-code/bot/session"
 )
 
 // Handler processes bot commands

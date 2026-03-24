@@ -2,28 +2,17 @@ package matrix
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/personal/matrix-claude-code-integration/internal/appservice"
-	"github.com/personal/matrix-claude-code-integration/internal/channel"
-	"github.com/personal/matrix-claude-code-integration/internal/commands"
-	"github.com/personal/matrix-claude-code-integration/internal/config"
-	"github.com/personal/matrix-claude-code-integration/internal/session"
+	"github.com/anthropics/matrix-claude-code/bot/channel"
+	"github.com/anthropics/matrix-claude-code/bot/commands"
+	"github.com/anthropics/matrix-claude-code/bot/config"
+	"github.com/anthropics/matrix-claude-code/bot/session"
 )
-
-// MatrixClient is an interface for sending messages to Matrix
-type MatrixClient interface {
-	SendMessage(ctx context.Context, roomID, message string) (string, error)
-	SendLiveMessage(ctx context.Context, roomID, threadID, message string) (string, error)
-	EditMessage(ctx context.Context, roomID, eventID, newContent string, isLive bool) error
-	SendReply(ctx context.Context, roomID, threadID, replyTo, message string, isNotice bool) (string, error)
-	SetTyping(ctx context.Context, roomID string, typing bool, timeoutMS int) error
-	JoinRoom(ctx context.Context, roomID string) error
-	GetBotUserID() string
-}
 
 // Handler handles Matrix events and coordinates with Claude Code via MCP channel
 type Handler struct {
@@ -39,6 +28,22 @@ type Handler struct {
 
 	// Track the handler start time to ignore old events
 	startTime time.Time
+
+	// Track pending permission requests
+	permissionMu       sync.Mutex
+	pendingPermissions map[string]*PendingPermission // requestID -> pending permission
+}
+
+// PendingPermission tracks a permission request awaiting user response
+type PendingPermission struct {
+	RequestID    string
+	ToolName     string
+	Description  string
+	InputPreview string
+	RoomID       string
+	EventID      string // The prompt message event ID
+	ResultChan   chan bool
+	CreatedAt    time.Time
 }
 
 // StreamingMessage tracks a message being streamed
@@ -60,18 +65,19 @@ func NewHandler(client MatrixClient, mcpServer *channel.MCPServer, cfg *config.C
 	)
 
 	return &Handler{
-		client:        client,
-		mcpServer:     mcpServer,
-		sessionMgr:    sessionMgr,
-		cmdHandler:    commands.NewHandler(sessionMgr),
-		cfg:           cfg,
-		streamingMsgs: make(map[string]*StreamingMessage),
-		startTime:     time.Now(),
+		client:             client,
+		mcpServer:          mcpServer,
+		sessionMgr:         sessionMgr,
+		cmdHandler:         commands.NewHandler(sessionMgr),
+		cfg:                cfg,
+		streamingMsgs:      make(map[string]*StreamingMessage),
+		startTime:          time.Now(),
+		pendingPermissions: make(map[string]*PendingPermission),
 	}
 }
 
 // HandleEvent processes a Matrix event (from either AS or bot mode)
-func (h *Handler) HandleEvent(ctx context.Context, event *appservice.Event) {
+func (h *Handler) HandleEvent(ctx context.Context, event *Event) {
 	log.Printf("HandleEvent: type=%s sender=%s room=%s", event.Type, event.Sender, event.RoomID)
 
 	// Only handle m.room.message events
@@ -125,6 +131,22 @@ func (h *Handler) HandleEvent(ctx context.Context, event *appservice.Event) {
 	log.Printf("Received message from %s in %s (thread: %s): %s",
 		event.Sender, roomID, threadID, truncate(body, 50))
 
+	// Check if it's a permission response command (!allow, !deny)
+	if isPermCmd, reqID, allowed := h.checkPermissionCommand(body); isPermCmd {
+		if h.HandlePermissionResponse(ctx, reqID, allowed) {
+			action := "denied"
+			if allowed {
+				action = "allowed"
+			}
+			h.sendReply(ctx, roomID, threadID, eventID,
+				fmt.Sprintf("Permission `%s` %s", reqID, action), false)
+		} else {
+			h.sendReply(ctx, roomID, threadID, eventID,
+				fmt.Sprintf("No pending permission request found for `%s`", reqID), true)
+		}
+		return
+	}
+
 	// Check if it's a command
 	result := h.cmdHandler.Parse(ctx, body, roomID, threadID)
 	if result.IsCommand {
@@ -137,7 +159,7 @@ func (h *Handler) HandleEvent(ctx context.Context, event *appservice.Event) {
 }
 
 // handleMemberEvent handles membership events (invites)
-func (h *Handler) handleMemberEvent(ctx context.Context, event *appservice.Event) {
+func (h *Handler) handleMemberEvent(ctx context.Context, event *Event) {
 	membership, _ := event.Content["membership"].(string)
 	stateKey := ""
 	if event.StateKey != nil {
@@ -298,6 +320,177 @@ func (h *Handler) sendReply(ctx context.Context, roomID, threadID, replyTo, mess
 	if err != nil {
 		log.Printf("Failed to send reply: %v", err)
 	}
+}
+
+// HandlePermissionRequest handles permission requests from Claude Code
+// It prompts the user in Matrix and waits for their response
+func (h *Handler) HandlePermissionRequest(ctx context.Context, req *channel.PermissionRequest) (bool, error) {
+	log.Printf("Permission request: id=%s tool=%s", req.RequestID, req.ToolName)
+
+	// Find the most recent active room to send the prompt to
+	// In a real implementation, you might want to track which room/thread is active
+	roomID := h.findActiveRoom()
+	if roomID == "" {
+		log.Printf("No active room found for permission request")
+		return false, fmt.Errorf("no active room for permission prompt")
+	}
+
+	// Create the permission prompt message
+	promptMsg := h.formatPermissionPrompt(req)
+
+	// Send the prompt to Matrix
+	eventID, err := h.client.SendMessage(ctx, roomID, promptMsg)
+	if err != nil {
+		log.Printf("Failed to send permission prompt: %v", err)
+		return false, err
+	}
+
+	// Create pending permission entry
+	resultChan := make(chan bool, 1)
+	pending := &PendingPermission{
+		RequestID:    req.RequestID,
+		ToolName:     req.ToolName,
+		Description:  req.Description,
+		InputPreview: req.InputPreview,
+		RoomID:       roomID,
+		EventID:      eventID,
+		ResultChan:   resultChan,
+		CreatedAt:    time.Now(),
+	}
+
+	h.permissionMu.Lock()
+	h.pendingPermissions[req.RequestID] = pending
+	h.permissionMu.Unlock()
+
+	// Wait for response with timeout
+	timeout := 60 * time.Second
+	select {
+	case allowed := <-resultChan:
+		h.cleanupPendingPermission(req.RequestID)
+		return allowed, nil
+	case <-time.After(timeout):
+		h.cleanupPendingPermission(req.RequestID)
+		// Send timeout message
+		h.client.SendMessage(ctx, roomID, fmt.Sprintf("⏰ Permission request `%s` timed out (denied)", req.RequestID))
+		return false, nil
+	case <-ctx.Done():
+		h.cleanupPendingPermission(req.RequestID)
+		return false, ctx.Err()
+	}
+}
+
+// formatPermissionPrompt formats a permission request for display in Matrix
+func (h *Handler) formatPermissionPrompt(req *channel.PermissionRequest) string {
+	var sb strings.Builder
+	sb.WriteString("🔐 **Permission Request**\n\n")
+	sb.WriteString(fmt.Sprintf("**Tool:** `%s`\n", req.ToolName))
+	sb.WriteString(fmt.Sprintf("**Action:** %s\n", req.Description))
+	if req.InputPreview != "" {
+		sb.WriteString(fmt.Sprintf("**Details:** ```\n%s\n```\n", req.InputPreview))
+	}
+	sb.WriteString(fmt.Sprintf("\n**ID:** `%s`\n\n", req.RequestID))
+	sb.WriteString("Reply with `!allow` or `!deny` (or `!a`/`!d`) to respond.\n")
+	sb.WriteString("_Request will timeout in 60 seconds._")
+	return sb.String()
+}
+
+// findActiveRoom returns the most recently active room
+// For now, returns the first room from a recent session
+func (h *Handler) findActiveRoom() string {
+	// Get active sessions and find the most recent one
+	sessions := h.sessionMgr.GetActiveSessions()
+	if len(sessions) == 0 {
+		return ""
+	}
+
+	// Return the first active room
+	// In production, you might want to track the last message room
+	for _, sess := range sessions {
+		return sess.RoomID
+	}
+	return ""
+}
+
+// cleanupPendingPermission removes a pending permission request
+func (h *Handler) cleanupPendingPermission(requestID string) {
+	h.permissionMu.Lock()
+	defer h.permissionMu.Unlock()
+	delete(h.pendingPermissions, requestID)
+}
+
+// HandlePermissionResponse handles a user's response to a permission request
+func (h *Handler) HandlePermissionResponse(ctx context.Context, requestID string, allowed bool) bool {
+	h.permissionMu.Lock()
+	pending, exists := h.pendingPermissions[requestID]
+	h.permissionMu.Unlock()
+
+	if !exists {
+		return false
+	}
+
+	// Send the result (non-blocking)
+	select {
+	case pending.ResultChan <- allowed:
+		return true
+	default:
+		return false
+	}
+}
+
+// checkPermissionCommand checks if a message is a permission response command
+// Returns (isPermissionCmd, requestID, allowed)
+func (h *Handler) checkPermissionCommand(body string) (bool, string, bool) {
+	body = strings.TrimSpace(body)
+	parts := strings.Fields(body)
+	if len(parts) == 0 {
+		return false, "", false
+	}
+
+	cmd := strings.ToLower(parts[0])
+
+	// Check for !allow or !a
+	if cmd == "!allow" || cmd == "!a" {
+		if len(parts) >= 2 {
+			return true, parts[1], true
+		}
+		// If no ID specified, use most recent pending request
+		if id := h.getMostRecentPendingID(); id != "" {
+			return true, id, true
+		}
+		return false, "", false
+	}
+
+	// Check for !deny or !d
+	if cmd == "!deny" || cmd == "!d" {
+		if len(parts) >= 2 {
+			return true, parts[1], false
+		}
+		// If no ID specified, use most recent pending request
+		if id := h.getMostRecentPendingID(); id != "" {
+			return true, id, false
+		}
+		return false, "", false
+	}
+
+	return false, "", false
+}
+
+// getMostRecentPendingID returns the most recent pending permission request ID
+func (h *Handler) getMostRecentPendingID() string {
+	h.permissionMu.Lock()
+	defer h.permissionMu.Unlock()
+
+	var mostRecent *PendingPermission
+	for _, p := range h.pendingPermissions {
+		if mostRecent == nil || p.CreatedAt.After(mostRecent.CreatedAt) {
+			mostRecent = p
+		}
+	}
+
+	if mostRecent != nil {
+		return mostRecent.RequestID
+	}
+	return ""
 }
 
 func truncate(s string, maxLen int) string {
