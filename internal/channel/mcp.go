@@ -119,8 +119,13 @@ type InputSchema struct {
 	Required   []string               `json:"required"`
 }
 
-// NewMCPServer creates a new MCP server for the Matrix channel
+// NewMCPServer creates a new MCP server for the Matrix channel using stdin/stdout
 func NewMCPServer(name, version string, replyHandler ReplyHandler) *MCPServer {
+	return NewMCPServerWithIO(name, version, replyHandler, os.Stdin, os.Stdout)
+}
+
+// NewMCPServerWithIO creates a new MCP server for the Matrix channel with custom IO
+func NewMCPServerWithIO(name, version string, replyHandler ReplyHandler, reader io.Reader, writer io.Writer) *MCPServer {
 	return &MCPServer{
 		name:    name,
 		version: version,
@@ -130,8 +135,8 @@ Each Matrix thread maintains context - replies in threads should reference the t
 		replyHandler: replyHandler,
 		notifyChan:   make(chan *Notification, 100),
 		replyResults: make(map[int]chan *ToolResult),
-		reader:       bufio.NewReader(os.Stdin),
-		writer:       os.Stdout,
+		reader:       bufio.NewReader(reader),
+		writer:       writer,
 	}
 }
 
