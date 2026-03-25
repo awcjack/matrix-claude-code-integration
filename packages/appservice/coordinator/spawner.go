@@ -211,17 +211,18 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	// We provide an initial empty newline to prevent immediate exit.
 	channelArg := fmt.Sprintf("server:%s", wrapperPath)
 	log.Printf("Spawning Claude with channels: %s", channelArg)
-	// Use --input-format stream-json for receiving messages via stdin
-	// Keep stdin connected to prevent Claude from exiting
-	// The MCP channel server will handle actual message communication
+	// Use --print mode with a prompt to start Claude Code
+	// The MCP channel server will send messages via notifications/claude/channel
+	// Claude processes the initial prompt and then continues receiving channel messages
 	cmd := exec.CommandContext(ctx, "claude",
+		"--print",
 		"--dangerously-skip-permissions",
 		"--dangerously-load-development-channels",
 		"--channels", channelArg,
 		"--model", session.Config.Model,
-		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
+		"You are connected to Matrix chat. Wait for messages from the matrix channel and respond using the reply tool.",
 	)
 
 	// Set working directory
@@ -246,14 +247,8 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		fmt.Sprintf("BRIDGE_THREAD_ID=%s", threadID),
 	)
 
-	// Create stdin pipe to keep Claude running with --input-format stream-json
-	// Without stdin connected, Claude may exit immediately
-	stdinPipe, err := cmd.StdinPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("create stdin pipe: %w", err)
-	}
-	session.Stdin = stdinPipe
+	// No stdin needed for --print mode - prompt is passed as argument
+	session.Stdin = nil
 
 	// Capture output for debugging
 	cmd.Stdout = os.Stdout
@@ -261,23 +256,8 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		stdinPipe.Close()
 		return nil, fmt.Errorf("start claude: %w", err)
 	}
-
-	// Send initial message to stdin to start the session
-	// With --input-format stream-json, Claude expects JSON messages on stdin
-	// We send an initial "hello" message to trigger session initialization
-	// The actual user message will come through the MCP channel
-	initialMsg := `{"type":"user","message":{"role":"user","content":"Session initialized via Matrix bridge. Waiting for messages..."}}`
-	go func() {
-		// Small delay to let Claude initialize
-		time.Sleep(500 * time.Millisecond)
-		if _, err := stdinPipe.Write([]byte(initialMsg + "\n")); err != nil {
-			log.Printf("Failed to write initial message to stdin: %v", err)
-		}
-		log.Printf("Sent initial message to Claude stdin")
-	}()
 
 	session.Process = cmd
 	s.sessions[sessionID] = session
