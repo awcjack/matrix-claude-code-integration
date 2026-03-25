@@ -184,6 +184,15 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		return nil, fmt.Errorf("read oauth token: %w", err)
 	}
 
+	// Create a wrapper script for the bridge that includes session configuration
+	// This is needed because Claude Code spawns the channel server as a subprocess
+	// without inheriting the coordinator's environment variables.
+	wrapperPath, err := s.createBridgeWrapper(sessionID, roomID, threadID)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("create bridge wrapper: %w", err)
+	}
+
 	// Spawn Claude Code process with MCP channel server
 	// The bridge binary acts as an MCP channel server that Claude Code connects to
 	// Permissions are handled via Matrix (!allow/!deny) through the MCP channel
@@ -203,7 +212,7 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		"--print",
 		"--dangerously-skip-permissions",
 		"--dangerously-load-development-channels",
-		"--channels", fmt.Sprintf("server:%s", s.bridgePath),
+		"--channels", fmt.Sprintf("server:%s", wrapperPath),
 		"--model", session.Config.Model,
 		"--output-format", "stream-json",
 		"--verbose",
@@ -370,6 +379,10 @@ func (s *Spawner) cleanupSession(session *Session) {
 		session.Process.Process.Kill()
 	}
 	session.Status = "stopped"
+
+	// Clean up the wrapper script
+	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", session.ID))
+	os.Remove(wrapperPath) // Ignore errors - file may not exist
 }
 
 // StopAllSessions stops all sessions
@@ -395,6 +408,26 @@ func (s *Spawner) makeSessionID(roomID, threadID string) string {
 		return fmt.Sprintf("%s:%s", roomID, threadID)
 	}
 	return roomID
+}
+
+// createBridgeWrapper creates a shell script wrapper that launches the bridge
+// with the correct configuration. This is needed because Claude Code spawns
+// channel servers as subprocesses without inheriting environment variables.
+func (s *Spawner) createBridgeWrapper(sessionID, roomID, threadID string) (string, error) {
+	// Create wrapper script in /tmp with unique name
+	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", sessionID))
+
+	// Create wrapper script content
+	script := fmt.Sprintf(`#!/bin/sh
+exec %s --session-id %q --socket %q --room-id %q --thread-id %q
+`, s.bridgePath, sessionID, s.socketPath, roomID, threadID)
+
+	// Write the wrapper script
+	if err := os.WriteFile(wrapperPath, []byte(script), 0755); err != nil {
+		return "", fmt.Errorf("write wrapper script: %w", err)
+	}
+
+	return wrapperPath, nil
 }
 
 // CleanupIdleSessions stops sessions that have been idle too long

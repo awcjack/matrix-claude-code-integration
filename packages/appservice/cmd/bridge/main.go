@@ -2,6 +2,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"net"
 	"os"
@@ -11,20 +12,41 @@ import (
 )
 
 func main() {
-	// Get configuration from environment (set by coordinator)
-	sessionID := os.Getenv("BRIDGE_SESSION_ID")
-	socketPath := os.Getenv("BRIDGE_IPC_SOCKET")
-	roomID := os.Getenv("BRIDGE_ROOM_ID")
-	threadID := os.Getenv("BRIDGE_THREAD_ID")
+	// Parse command-line flags (preferred) or fallback to environment variables
+	// Command-line args are used when spawned by Claude Code via --channels
+	// Environment variables are used when run directly by coordinator (legacy/testing)
+	sessionIDFlag := flag.String("session-id", "", "Session ID")
+	socketPathFlag := flag.String("socket", "", "IPC socket path")
+	roomIDFlag := flag.String("room-id", "", "Matrix room ID")
+	threadIDFlag := flag.String("thread-id", "", "Matrix thread ID (optional)")
+	flag.Parse()
+
+	// Use flags if provided, otherwise fall back to environment variables
+	sessionID := *sessionIDFlag
+	if sessionID == "" {
+		sessionID = os.Getenv("BRIDGE_SESSION_ID")
+	}
+	socketPath := *socketPathFlag
+	if socketPath == "" {
+		socketPath = os.Getenv("BRIDGE_IPC_SOCKET")
+	}
+	roomID := *roomIDFlag
+	if roomID == "" {
+		roomID = os.Getenv("BRIDGE_ROOM_ID")
+	}
+	threadID := *threadIDFlag
+	if threadID == "" {
+		threadID = os.Getenv("BRIDGE_THREAD_ID")
+	}
 
 	if sessionID == "" {
-		log.Fatal("BRIDGE_SESSION_ID environment variable is required")
+		log.Fatal("session-id flag or BRIDGE_SESSION_ID environment variable is required")
 	}
 	if socketPath == "" {
-		log.Fatal("BRIDGE_IPC_SOCKET environment variable is required")
+		log.Fatal("socket flag or BRIDGE_IPC_SOCKET environment variable is required")
 	}
 	if roomID == "" {
-		log.Fatal("BRIDGE_ROOM_ID environment variable is required")
+		log.Fatal("room-id flag or BRIDGE_ROOM_ID environment variable is required")
 	}
 
 	log.Printf("Bridge starting: session=%s socket=%s room=%s thread=%s",
