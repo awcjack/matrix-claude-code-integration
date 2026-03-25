@@ -2,12 +2,15 @@
 package coordinator
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,20 +24,102 @@ import (
 // ClaudeCredentials represents the structure of ~/.claude/.credentials.json
 type ClaudeCredentials struct {
 	ClaudeAiOauth *struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ExpiresAt    int64  `json:"expiresAt"`
+		AccessToken      string   `json:"accessToken"`
+		RefreshToken     string   `json:"refreshToken"`
+		ExpiresAt        int64    `json:"expiresAt"`
+		Scopes           []string `json:"scopes,omitempty"`
+		SubscriptionType string   `json:"subscriptionType,omitempty"`
+		RateLimitTier    string   `json:"rateLimitTier,omitempty"`
 	} `json:"claudeAiOauth"`
 }
 
-// readClaudeOAuthToken reads the OAuth token from ~/.claude/.credentials.json
-func readClaudeOAuthToken() (string, error) {
+// OAuthRefreshResponse represents the response from token refresh
+type OAuthRefreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"` // seconds
+	TokenType    string `json:"token_type"`
+}
+
+// getCredentialsPath returns the path to ~/.claude/.credentials.json
+func getCredentialsPath() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home directory: %w", err)
 	}
+	return filepath.Join(homeDir, ".claude", ".credentials.json"), nil
+}
 
-	credPath := filepath.Join(homeDir, ".claude", ".credentials.json")
+// refreshOAuthToken refreshes the OAuth token using the refresh token
+func refreshOAuthToken(creds *ClaudeCredentials, credPath string) (string, error) {
+	if creds.ClaudeAiOauth.RefreshToken == "" {
+		return "", fmt.Errorf("no refresh token available")
+	}
+
+	log.Printf("Refreshing OAuth token...")
+
+	// Build refresh request
+	// The Claude Code OAuth flow uses Anthropic's OAuth endpoints
+	data := url.Values{}
+	data.Set("grant_type", "refresh_token")
+	data.Set("refresh_token", creds.ClaudeAiOauth.RefreshToken)
+	data.Set("client_id", "9d1c250a-e61b-44d7-b16d-1b90190a08e5") // Claude Code client ID
+
+	req, err := http.NewRequest("POST", "https://console.anthropic.com/v1/oauth/token", bytes.NewBufferString(data.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("create refresh request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("refresh request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read refresh response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("refresh failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var refreshResp OAuthRefreshResponse
+	if err := json.Unmarshal(body, &refreshResp); err != nil {
+		return "", fmt.Errorf("parse refresh response: %w", err)
+	}
+
+	// Update credentials
+	creds.ClaudeAiOauth.AccessToken = refreshResp.AccessToken
+	if refreshResp.RefreshToken != "" {
+		creds.ClaudeAiOauth.RefreshToken = refreshResp.RefreshToken
+	}
+	creds.ClaudeAiOauth.ExpiresAt = time.Now().UnixMilli() + (refreshResp.ExpiresIn * 1000)
+
+	// Save updated credentials
+	updatedData, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal updated credentials: %w", err)
+	}
+	if err := os.WriteFile(credPath, updatedData, 0600); err != nil {
+		return "", fmt.Errorf("save updated credentials: %w", err)
+	}
+
+	log.Printf("OAuth token refreshed successfully, new expiry: %d", creds.ClaudeAiOauth.ExpiresAt)
+	return refreshResp.AccessToken, nil
+}
+
+// readClaudeOAuthToken reads the OAuth token from ~/.claude/.credentials.json
+// If the token is expired, it will attempt to refresh it using the refresh token
+func readClaudeOAuthToken() (string, error) {
+	credPath, err := getCredentialsPath()
+	if err != nil {
+		return "", err
+	}
+
 	log.Printf("Reading OAuth token from: %s", credPath)
 
 	data, err := os.ReadFile(credPath)
@@ -57,10 +142,16 @@ func readClaudeOAuthToken() (string, error) {
 		log.Printf("OAuth token loaded: %s...%s (expires: %d)", token[:8], token[len(token)-8:], creds.ClaudeAiOauth.ExpiresAt)
 	}
 
-	// Check if token is expired
+	// Check if token is expired or about to expire (5 minute buffer)
 	now := time.Now().UnixMilli()
-	if creds.ClaudeAiOauth.ExpiresAt > 0 && creds.ClaudeAiOauth.ExpiresAt < now {
-		log.Printf("WARNING: OAuth token appears expired! expiresAt=%d, now=%d", creds.ClaudeAiOauth.ExpiresAt, now)
+	bufferMs := int64(5 * 60 * 1000) // 5 minutes
+	if creds.ClaudeAiOauth.ExpiresAt > 0 && creds.ClaudeAiOauth.ExpiresAt < (now+bufferMs) {
+		log.Printf("OAuth token expired or expiring soon (expiresAt=%d, now=%d), refreshing...", creds.ClaudeAiOauth.ExpiresAt, now)
+		newToken, err := refreshOAuthToken(&creds, credPath)
+		if err != nil {
+			return "", fmt.Errorf("refresh token: %w", err)
+		}
+		return newToken, nil
 	}
 
 	return creds.ClaudeAiOauth.AccessToken, nil
