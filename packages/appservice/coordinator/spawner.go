@@ -35,6 +35,8 @@ func readClaudeOAuthToken() (string, error) {
 	}
 
 	credPath := filepath.Join(homeDir, ".claude", ".credentials.json")
+	log.Printf("Reading OAuth token from: %s", credPath)
+
 	data, err := os.ReadFile(credPath)
 	if err != nil {
 		return "", fmt.Errorf("read credentials file: %w", err)
@@ -47,6 +49,18 @@ func readClaudeOAuthToken() (string, error) {
 
 	if creds.ClaudeAiOauth == nil || creds.ClaudeAiOauth.AccessToken == "" {
 		return "", fmt.Errorf("no OAuth token found in credentials")
+	}
+
+	// Log token info (first/last 8 chars only for security)
+	token := creds.ClaudeAiOauth.AccessToken
+	if len(token) > 16 {
+		log.Printf("OAuth token loaded: %s...%s (expires: %d)", token[:8], token[len(token)-8:], creds.ClaudeAiOauth.ExpiresAt)
+	}
+
+	// Check if token is expired
+	now := time.Now().UnixMilli()
+	if creds.ClaudeAiOauth.ExpiresAt > 0 && creds.ClaudeAiOauth.ExpiresAt < now {
+		log.Printf("WARNING: OAuth token appears expired! expiresAt=%d, now=%d", creds.ClaudeAiOauth.ExpiresAt, now)
 	}
 
 	return creds.ClaudeAiOauth.AccessToken, nil
