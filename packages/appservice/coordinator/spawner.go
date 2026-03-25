@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -67,6 +68,7 @@ type Session struct {
 	Config       SessionConfig
 	Status       string
 	Process      *exec.Cmd
+	Stdin        io.WriteCloser // Stdin pipe to keep process alive
 	CreatedAt    time.Time
 	LastActive   time.Time
 	MessageCount int
@@ -204,8 +206,9 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	// --channels server:<path>: Connect to our bridge as MCP channel server
 	// --resume: Resume or create a new session (prevents --print mode auto-detection)
 	//
-	// Note: We do NOT use --print mode because it exits after one turn.
-	// Instead, we use --resume which keeps the session alive for MCP channel communication.
+	// Note: We run Claude Code with --input-format stream-json and keep stdin open.
+	// This allows Claude to receive messages from the MCP channel while running.
+	// We provide an initial empty newline to prevent immediate exit.
 	channelArg := fmt.Sprintf("server:%s", wrapperPath)
 	log.Printf("Spawning Claude with channels: %s", channelArg)
 	cmd := exec.CommandContext(ctx, "claude",
@@ -213,7 +216,6 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		"--dangerously-load-development-channels",
 		"--channels", channelArg,
 		"--model", session.Config.Model,
-		"--resume",
 	)
 
 	// Set working directory
@@ -238,12 +240,22 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		fmt.Sprintf("BRIDGE_THREAD_ID=%s", threadID),
 	)
 
+	// Create stdin pipe to keep Claude running
+	// Without stdin connected, Claude may exit immediately or enter --print mode
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("create stdin pipe: %w", err)
+	}
+	session.Stdin = stdinPipe
+
 	// Capture output for debugging
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		cancel()
+		stdinPipe.Close()
 		return nil, fmt.Errorf("start claude: %w", err)
 	}
 
@@ -371,6 +383,10 @@ func (s *Spawner) StopSession(sessionID string) error {
 func (s *Spawner) cleanupSession(session *Session) {
 	if session.cancel != nil {
 		session.cancel()
+	}
+	// Close stdin pipe to signal process to exit
+	if session.Stdin != nil {
+		session.Stdin.Close()
 	}
 	if session.Process != nil && session.Process.Process != nil {
 		session.Process.Process.Kill()
