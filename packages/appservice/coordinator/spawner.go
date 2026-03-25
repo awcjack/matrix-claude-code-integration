@@ -184,17 +184,30 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		return nil, fmt.Errorf("read oauth token: %w", err)
 	}
 
-	// Spawn bridge process
-	// The bridge will be started by Claude Code as its MCP channel server
-	// We just need to track it and wait for it to connect via IPC
+	// Spawn Claude Code process with MCP channel server
+	// The bridge binary acts as an MCP channel server that Claude Code connects to
 	// Permissions are handled via Matrix (!allow/!deny) through the MCP channel
-	// --dangerously-skip-permissions: Required for non-interactive mode
+	//
+	// Flags explained:
+	// --dangerously-skip-permissions: Required for non-interactive/headless mode
 	// --dangerously-load-development-channels: Required for custom channel servers
+	// --channels server:<path>: Connect to our bridge as MCP channel server
+	// --print: Run in non-interactive mode (required for headless operation)
+	// --output-format stream-json: Output as streaming JSON for parsing
+	// --verbose: Enable verbose logging for debugging
+	//
+	// Note: --print mode requires a prompt argument. We provide an initial prompt
+	// that establishes the session. Subsequent messages come via the MCP channel.
+	initialPrompt := "Session initialized. Waiting for user input via MCP channel."
 	cmd := exec.CommandContext(ctx, "claude",
+		"--print",
 		"--dangerously-skip-permissions",
 		"--dangerously-load-development-channels",
 		"--channels", fmt.Sprintf("server:%s", s.bridgePath),
 		"--model", session.Config.Model,
+		"--output-format", "stream-json",
+		"--verbose",
+		initialPrompt,
 	)
 
 	// Set working directory
@@ -203,10 +216,16 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	}
 
 	// Set environment for bridge to find coordinator
-	// CLAUDE_CODE_OAUTH_TOKEN bypasses the credential store, preventing logout issues
-	// when multiple Claude processes run concurrently
+	// Environment variables explained:
+	// - CLAUDE_CODE_OAUTH_TOKEN: Bypasses credential store, prevents logout issues
+	//   when multiple Claude processes run concurrently
+	// - CLAUDE_CODE_HOST_PLATFORM: Override platform reported in telemetry
+	// - CLAUDE_CODE_ENTRYPOINT: Mark as standard CLI entrypoint
+	// - BRIDGE_*: Internal variables for bridge IPC communication
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("CLAUDE_CODE_OAUTH_TOKEN=%s", oauthToken),
+		"CLAUDE_CODE_HOST_PLATFORM=linux",
+		"CLAUDE_CODE_ENTRYPOINT=cli",
 		fmt.Sprintf("BRIDGE_SESSION_ID=%s", sessionID),
 		fmt.Sprintf("BRIDGE_IPC_SOCKET=%s", s.socketPath),
 		fmt.Sprintf("BRIDGE_ROOM_ID=%s", roomID),
