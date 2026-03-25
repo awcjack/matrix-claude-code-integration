@@ -3,6 +3,7 @@ package coordinator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -201,22 +202,16 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	// --dangerously-skip-permissions: Required for non-interactive/headless mode
 	// --dangerously-load-development-channels: Required for custom channel servers
 	// --channels server:<path>: Connect to our bridge as MCP channel server
-	// --print: Run in non-interactive mode (required for headless operation)
-	// --output-format stream-json: Output as streaming JSON for parsing
-	// --verbose: Enable verbose logging for debugging
+	// --resume: Resume or create a new session (prevents --print mode auto-detection)
 	//
-	// Note: --print mode requires a prompt argument. We provide an initial prompt
-	// that establishes the session. Subsequent messages come via the MCP channel.
-	initialPrompt := "Session initialized. Waiting for user input via MCP channel."
+	// Note: We do NOT use --print mode because it exits after one turn.
+	// Instead, we use --resume which keeps the session alive for MCP channel communication.
 	cmd := exec.CommandContext(ctx, "claude",
-		"--print",
 		"--dangerously-skip-permissions",
 		"--dangerously-load-development-channels",
 		"--channels", fmt.Sprintf("server:%s", wrapperPath),
 		"--model", session.Config.Model,
-		"--output-format", "stream-json",
-		"--verbose",
-		initialPrompt,
+		"--resume",
 	)
 
 	// Set working directory
@@ -380,8 +375,9 @@ func (s *Spawner) cleanupSession(session *Session) {
 	}
 	session.Status = "stopped"
 
-	// Clean up the wrapper script
-	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", session.ID))
+	// Clean up the wrapper script (use same hash as createBridgeWrapper)
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(session.ID)))[:16]
+	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", hash))
 	os.Remove(wrapperPath) // Ignore errors - file may not exist
 }
 
@@ -415,7 +411,9 @@ func (s *Spawner) makeSessionID(roomID, threadID string) string {
 // channel servers as subprocesses without inheriting environment variables.
 func (s *Spawner) createBridgeWrapper(sessionID, roomID, threadID string) (string, error) {
 	// Create wrapper script in /tmp with unique name
-	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", sessionID))
+	// Use hash of sessionID to avoid special characters in filename (!, :, etc)
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
+	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", hash))
 
 	// Create wrapper script content
 	script := fmt.Sprintf(`#!/bin/sh
