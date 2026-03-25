@@ -269,17 +269,27 @@ func (s *MCPServer) handleReplyTool(ctx context.Context, req *MCPRequest, args j
 		return
 	}
 
+	// Validate room_id matches session context to prevent cross-room messaging
+	if replyArgs.RoomID != s.roomID {
+		log.Printf("Reply blocked: room_id %s does not match session room %s", replyArgs.RoomID, s.roomID)
+		s.sendError(req.ID, -32602, "room_id must match the session's room")
+		return
+	}
+
 	// Call the reply handler
-	if s.replyHandler != nil {
-		if err := s.replyHandler(replyArgs.RoomID, replyArgs.ThreadID, replyArgs.Text); err != nil {
-			log.Printf("Reply handler error: %v", err)
-			s.sendResponse(req.ID, map[string]interface{}{
-				"content": []map[string]interface{}{
-					{"type": "text", "text": fmt.Sprintf("failed: %v", err)},
-				},
-			})
-			return
-		}
+	if s.replyHandler == nil {
+		s.sendError(req.ID, -32603, "reply handler not configured")
+		return
+	}
+
+	if err := s.replyHandler(replyArgs.RoomID, replyArgs.ThreadID, replyArgs.Text); err != nil {
+		log.Printf("Reply handler error: %v", err)
+		s.sendResponse(req.ID, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": fmt.Sprintf("failed: %v", err)},
+			},
+		})
+		return
 	}
 
 	s.sendResponse(req.ID, map[string]interface{}{
@@ -308,17 +318,27 @@ func (s *MCPServer) handleStreamingReplyTool(ctx context.Context, req *MCPReques
 		return
 	}
 
+	// Validate room_id matches session context to prevent cross-room messaging
+	if streamArgs.RoomID != s.roomID {
+		log.Printf("Streaming reply blocked: room_id %s does not match session room %s", streamArgs.RoomID, s.roomID)
+		s.sendError(req.ID, -32602, "room_id must match the session's room")
+		return
+	}
+
 	// Call the streaming reply handler
-	if s.streamingReplyHandler != nil {
-		if err := s.streamingReplyHandler(streamArgs.RoomID, streamArgs.ThreadID, streamArgs.Chunk, streamArgs.IsFinal); err != nil {
-			log.Printf("Streaming reply handler error: %v", err)
-			s.sendResponse(req.ID, map[string]interface{}{
-				"content": []map[string]interface{}{
-					{"type": "text", "text": fmt.Sprintf("failed: %v", err)},
-				},
-			})
-			return
-		}
+	if s.streamingReplyHandler == nil {
+		s.sendError(req.ID, -32603, "streaming reply handler not configured")
+		return
+	}
+
+	if err := s.streamingReplyHandler(streamArgs.RoomID, streamArgs.ThreadID, streamArgs.Chunk, streamArgs.IsFinal); err != nil {
+		log.Printf("Streaming reply handler error: %v", err)
+		s.sendResponse(req.ID, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": fmt.Sprintf("failed: %v", err)},
+			},
+		})
+		return
 	}
 
 	status := "chunk_sent"
@@ -350,13 +370,17 @@ func (s *MCPServer) handlePermissionRequest(ctx context.Context, req *MCPRequest
 	log.Printf("Permission request: id=%s tool=%s", permReq.RequestID, permReq.ToolName)
 
 	// Forward to coordinator via handler
-	if s.permissionHandler != nil {
-		if err := s.permissionHandler(permReq.RequestID, permReq.ToolName, permReq.Description, permReq.InputPreview); err != nil {
-			log.Printf("Permission handler error: %v", err)
-			// Default deny on error
-			s.SendPermissionVerdict(permReq.RequestID, false)
-			return
-		}
+	if s.permissionHandler == nil {
+		log.Printf("No permission handler set, denying request %s", permReq.RequestID)
+		s.SendPermissionVerdict(permReq.RequestID, false)
+		return
+	}
+
+	if err := s.permissionHandler(permReq.RequestID, permReq.ToolName, permReq.Description, permReq.InputPreview); err != nil {
+		log.Printf("Permission handler error: %v", err)
+		// Default deny on error
+		s.SendPermissionVerdict(permReq.RequestID, false)
+		return
 	}
 
 	// The verdict will be sent via SendPermissionVerdict when coordinator responds
