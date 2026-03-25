@@ -3,16 +3,52 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/anthropics/matrix-claude-code/appservice/ipc"
 )
+
+// ClaudeCredentials represents the structure of ~/.claude/.credentials.json
+type ClaudeCredentials struct {
+	ClaudeAiOauth *struct {
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresAt    string `json:"expiresAt"`
+	} `json:"claudeAiOauth"`
+}
+
+// readClaudeOAuthToken reads the OAuth token from ~/.claude/.credentials.json
+func readClaudeOAuthToken() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("get home directory: %w", err)
+	}
+
+	credPath := filepath.Join(homeDir, ".claude", ".credentials.json")
+	data, err := os.ReadFile(credPath)
+	if err != nil {
+		return "", fmt.Errorf("read credentials file: %w", err)
+	}
+
+	var creds ClaudeCredentials
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return "", fmt.Errorf("parse credentials: %w", err)
+	}
+
+	if creds.ClaudeAiOauth == nil || creds.ClaudeAiOauth.AccessToken == "" {
+		return "", fmt.Errorf("no OAuth token found in credentials")
+	}
+
+	return creds.ClaudeAiOauth.AccessToken, nil
+}
 
 // SessionConfig holds configuration for a session
 type SessionConfig struct {
@@ -140,6 +176,14 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		cancel:    cancel,
 	}
 
+	// Read OAuth token from ~/.claude/.credentials.json
+	// This prevents race conditions when multiple Claude processes access the credential store
+	oauthToken, err := readClaudeOAuthToken()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("read oauth token: %w", err)
+	}
+
 	// Spawn bridge process
 	// The bridge will be started by Claude Code as its MCP channel server
 	// We just need to track it and wait for it to connect via IPC
@@ -155,7 +199,10 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	}
 
 	// Set environment for bridge to find coordinator
+	// CLAUDE_CODE_OAUTH_TOKEN bypasses the credential store, preventing logout issues
+	// when multiple Claude processes run concurrently
 	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("CLAUDE_CODE_OAUTH_TOKEN=%s", oauthToken),
 		fmt.Sprintf("BRIDGE_SESSION_ID=%s", sessionID),
 		fmt.Sprintf("BRIDGE_IPC_SOCKET=%s", s.socketPath),
 		fmt.Sprintf("BRIDGE_ROOM_ID=%s", roomID),
