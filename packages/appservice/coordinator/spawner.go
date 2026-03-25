@@ -143,9 +143,8 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	// Spawn bridge process
 	// The bridge will be started by Claude Code as its MCP channel server
 	// We just need to track it and wait for it to connect via IPC
-	// Use -p to skip interactive permission prompts (permissions handled via Matrix)
+	// Permissions are handled via Matrix (!allow/!deny) through the MCP channel
 	cmd := exec.CommandContext(ctx, "claude",
-		"-p",
 		"--channels", fmt.Sprintf("server:%s", s.bridgePath),
 		"--model", session.Config.Model,
 	)
