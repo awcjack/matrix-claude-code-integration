@@ -36,9 +36,9 @@ type Server struct {
 	router     *Router
 	client     matrix.MatrixClient
 
-	// Transaction idempotency
+	// Transaction idempotency (with timestamps for cleanup)
 	txnMu        sync.Mutex
-	processedTxn map[string]bool
+	processedTxn map[string]time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -54,7 +54,7 @@ func NewServer(config ServerConfig, client matrix.MatrixClient) *Server {
 		config:       config,
 		spawner:      spawner,
 		client:       client,
-		processedTxn: make(map[string]bool),
+		processedTxn: make(map[string]time.Time),
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -62,10 +62,32 @@ func NewServer(config ServerConfig, client matrix.MatrixClient) *Server {
 	// Create IPC server
 	server.ipcServer = ipc.NewServer(config.SocketPath, server.handleIPCMessage)
 
+	// Set up dead session handler for health check recovery
+	server.ipcServer.SetSessionDeadHandler(server.handleDeadSession)
+
 	// Create router
 	server.router = NewRouter(spawner, server.ipcServer, client, config.Whitelist)
 
 	return server
+}
+
+// handleDeadSession handles sessions detected as dead by IPC health checks
+func (s *Server) handleDeadSession(sessionID string) {
+	log.Printf("Session %s detected as dead by IPC health check", sessionID)
+
+	// Mark the session as dead in the spawner
+	s.spawner.HandleDeadSession(sessionID)
+
+	// Get session info to notify the room
+	session, exists := s.spawner.GetSession(sessionID)
+	if exists && session.RoomID != "" {
+		// Notify the room that the session died and will be restarted on next message
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		s.client.SendMessage(ctx, session.RoomID,
+			"⚠️ Claude Code session disconnected. It will be automatically restarted when you send the next message.")
+	}
 }
 
 // Start starts the coordinator server
@@ -169,13 +191,13 @@ func (s *Server) handleTransactions(w http.ResponseWriter, r *http.Request) {
 
 	// Check idempotency
 	s.txnMu.Lock()
-	if s.processedTxn[txnID] {
+	if _, exists := s.processedTxn[txnID]; exists {
 		s.txnMu.Unlock()
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{})
 		return
 	}
-	s.processedTxn[txnID] = true
+	s.processedTxn[txnID] = time.Now()
 	s.txnMu.Unlock()
 
 	// Parse transaction
@@ -282,7 +304,7 @@ func (s *Server) handleRoomQuery(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{})
 }
 
-// cleanupLoop periodically cleans up idle sessions
+// cleanupLoop periodically cleans up idle sessions, old transactions, and stale state
 func (s *Server) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -293,6 +315,21 @@ func (s *Server) cleanupLoop() {
 			return
 		case <-ticker.C:
 			s.spawner.CleanupIdleSessions(s.config.IdleTimeout)
+			s.cleanupOldTransactions()
+			s.router.CleanupStaleState()
+		}
+	}
+}
+
+// cleanupOldTransactions removes transaction IDs older than 1 hour
+func (s *Server) cleanupOldTransactions() {
+	s.txnMu.Lock()
+	defer s.txnMu.Unlock()
+
+	cutoff := time.Now().Add(-1 * time.Hour)
+	for txnID, seenAt := range s.processedTxn {
+		if seenAt.Before(cutoff) {
+			delete(s.processedTxn, txnID)
 		}
 	}
 }
