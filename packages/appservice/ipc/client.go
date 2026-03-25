@@ -147,8 +147,14 @@ func (c *Client) handleMessage(msg *IPCMessage) error {
 	return nil
 }
 
+// errNotConnected is returned when trying to send on a closed connection
+var errNotConnected = fmt.Errorf("client not connected")
+
 // SendReply sends a reply message to the coordinator
 func (c *Client) SendReply(roomID, threadID, text string) error {
+	if c.conn == nil {
+		return errNotConnected
+	}
 	msg, err := NewIPCMessage(TypeReply, c.sessionID, &ReplyPayload{
 		RoomID:   roomID,
 		ThreadID: threadID,
@@ -162,6 +168,9 @@ func (c *Client) SendReply(roomID, threadID, text string) error {
 
 // SendStreamingReply sends a streaming reply chunk to the coordinator
 func (c *Client) SendStreamingReply(roomID, threadID, chunk string, isFinal bool) error {
+	if c.conn == nil {
+		return errNotConnected
+	}
 	msg, err := NewIPCMessage(TypeStreamingReply, c.sessionID, &StreamingReplyPayload{
 		RoomID:   roomID,
 		ThreadID: threadID,
@@ -176,6 +185,9 @@ func (c *Client) SendStreamingReply(roomID, threadID, chunk string, isFinal bool
 
 // SendPermissionRequest sends a permission request to the coordinator
 func (c *Client) SendPermissionRequest(requestID, toolName, description, inputPreview, roomID string) error {
+	if c.conn == nil {
+		return errNotConnected
+	}
 	msg, err := NewIPCMessage(TypePermissionRequest, c.sessionID, &PermissionRequestPayload{
 		RequestID:    requestID,
 		ToolName:     toolName,
@@ -191,6 +203,9 @@ func (c *Client) SendPermissionRequest(requestID, toolName, description, inputPr
 
 // SendStatus sends a status update to the coordinator
 func (c *Client) SendStatus(status, errorMsg string, claudePID int) error {
+	if c.conn == nil {
+		return errNotConnected
+	}
 	msg, err := NewIPCMessage(TypeStatus, c.sessionID, &StatusPayload{
 		Status:    status,
 		Error:     errorMsg,
@@ -204,6 +219,9 @@ func (c *Client) SendStatus(status, errorMsg string, claudePID int) error {
 
 // SendPong responds to a ping
 func (c *Client) SendPong() error {
+	if c.conn == nil {
+		return errNotConnected
+	}
 	msg, err := NewIPCMessage(TypePong, c.sessionID, &PongPayload{})
 	if err != nil {
 		return err
