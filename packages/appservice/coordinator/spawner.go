@@ -21,7 +21,7 @@ type ClaudeCredentials struct {
 	ClaudeAiOauth *struct {
 		AccessToken  string `json:"accessToken"`
 		RefreshToken string `json:"refreshToken"`
-		ExpiresAt    string `json:"expiresAt"`
+		ExpiresAt    int64  `json:"expiresAt"`
 	} `json:"claudeAiOauth"`
 }
 
