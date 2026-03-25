@@ -73,7 +73,7 @@ make build-appservice
   },
   "sessions": {
     "working_directory": "/workspace",
-    "model": "claude-sonnet-4-6-20250514",
+    "model": "sonnet",
     "idle_timeout": "30m"
   },
   "ipc": {

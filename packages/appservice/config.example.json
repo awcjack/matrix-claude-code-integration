@@ -11,7 +11,7 @@
   },
   "sessions": {
     "working_directory": "/workspace",
-    "model": "claude-sonnet-4-6-20250514",
+    "model": "sonnet",
     "system_prompt": "",
     "max_concurrent": 10,
     "idle_timeout": "30m"

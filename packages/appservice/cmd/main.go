@@ -203,7 +203,7 @@ func validateConfig(cfg *Config) error {
 		return &configError{"whitelist is required"}
 	}
 	if cfg.Sessions.Model == "" {
-		cfg.Sessions.Model = "claude-sonnet-4-6-20250514"
+		cfg.Sessions.Model = "sonnet"
 	}
 	return nil
 }
