@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 )
 
 // MessageHandler is called when a message is received from a bridge
@@ -20,6 +21,10 @@ type Server struct {
 
 	mu          sync.RWMutex
 	connections map[string]*Connection // sessionID -> connection
+	lastPong    map[string]time.Time   // sessionID -> last pong time
+
+	// Health check callback
+	onSessionDead func(sessionID string)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -32,9 +37,15 @@ func NewServer(socketPath string, handler MessageHandler) *Server {
 		socketPath:  socketPath,
 		handler:     handler,
 		connections: make(map[string]*Connection),
+		lastPong:    make(map[string]time.Time),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+}
+
+// SetSessionDeadHandler sets the callback for when a session is detected as dead
+func (s *Server) SetSessionDeadHandler(handler func(sessionID string)) {
+	s.onSessionDead = handler
 }
 
 // Start begins listening for connections
@@ -59,6 +70,7 @@ func (s *Server) Start() error {
 	log.Printf("IPC server listening on %s", s.socketPath)
 
 	go s.acceptLoop()
+	go s.healthCheckLoop()
 	return nil
 }
 
@@ -155,6 +167,78 @@ func (s *Server) SendToSession(sessionID string, msg *IPCMessage) error {
 	}
 
 	return conn.SendMessage(msg)
+}
+
+// healthCheckLoop periodically pings all connected sessions
+func (s *Server) healthCheckLoop() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.checkSessionHealth()
+		}
+	}
+}
+
+// checkSessionHealth sends pings and checks for dead sessions
+func (s *Server) checkSessionHealth() {
+	s.mu.RLock()
+	sessionIDs := make([]string, 0, len(s.connections))
+	for id := range s.connections {
+		sessionIDs = append(sessionIDs, id)
+	}
+	s.mu.RUnlock()
+
+	for _, sessionID := range sessionIDs {
+		// Check if last pong is too old (missed 2 pings = 30+ seconds)
+		s.mu.RLock()
+		lastPong, hasPong := s.lastPong[sessionID]
+		s.mu.RUnlock()
+
+		if hasPong && time.Since(lastPong) > 35*time.Second {
+			log.Printf("Session %s failed health check (no pong for %v)", sessionID, time.Since(lastPong))
+			s.markSessionDead(sessionID)
+			continue
+		}
+
+		// Send ping
+		pingMsg, err := NewIPCMessage(TypePing, "", &PingPayload{})
+		if err != nil {
+			continue
+		}
+
+		if err := s.SendToSession(sessionID, pingMsg); err != nil {
+			log.Printf("Failed to send ping to session %s: %v", sessionID, err)
+			s.markSessionDead(sessionID)
+		}
+	}
+}
+
+// markSessionDead handles a dead session
+func (s *Server) markSessionDead(sessionID string) {
+	s.mu.Lock()
+	conn, exists := s.connections[sessionID]
+	if exists {
+		conn.Close()
+		delete(s.connections, sessionID)
+		delete(s.lastPong, sessionID)
+	}
+	s.mu.Unlock()
+
+	if exists && s.onSessionDead != nil {
+		s.onSessionDead(sessionID)
+	}
+}
+
+// RecordPong records a pong received from a session
+func (s *Server) RecordPong(sessionID string) {
+	s.mu.Lock()
+	s.lastPong[sessionID] = time.Now()
+	s.mu.Unlock()
 }
 
 // GetConnectedSessions returns a list of connected session IDs
