@@ -8,15 +8,8 @@ import (
 	"os"
 	"time"
 
-	"golang.org/x/term"
-
 	"github.com/anthropics/matrix-claude-code/appservice/bridge"
 )
-
-// isatty checks if stdin is a terminal
-func isatty() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
-}
 
 func main() {
 	// Parse command-line flags (preferred) or fallback to environment variables
@@ -70,7 +63,6 @@ func main() {
 	log.Printf("Working directory: %s", func() string { d, _ := os.Getwd(); return d }())
 	log.Printf("PID: %d", os.Getpid())
 	log.Printf("Args: %v", os.Args)
-	log.Printf("Stdin isatty: %v", isatty())
 
 	// Wait for socket to be available with timeout
 	log.Printf("Waiting for socket at: %s", socketPath)
