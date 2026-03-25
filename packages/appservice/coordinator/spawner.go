@@ -265,6 +265,20 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		return nil, fmt.Errorf("start claude: %w", err)
 	}
 
+	// Send initial message to stdin to start the session
+	// With --input-format stream-json, Claude expects JSON messages on stdin
+	// We send an initial "hello" message to trigger session initialization
+	// The actual user message will come through the MCP channel
+	initialMsg := `{"type":"user","message":{"role":"user","content":"Session initialized via Matrix bridge. Waiting for messages..."}}`
+	go func() {
+		// Small delay to let Claude initialize
+		time.Sleep(500 * time.Millisecond)
+		if _, err := stdinPipe.Write([]byte(initialMsg + "\n")); err != nil {
+			log.Printf("Failed to write initial message to stdin: %v", err)
+		}
+		log.Printf("Sent initial message to Claude stdin")
+	}()
+
 	session.Process = cmd
 	s.sessions[sessionID] = session
 
