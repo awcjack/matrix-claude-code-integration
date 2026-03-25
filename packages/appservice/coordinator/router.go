@@ -42,6 +42,7 @@ type StreamingMessage struct {
 	EventID     string
 	Content     string
 	LastUpdated time.Time
+	CreatedAt   time.Time
 }
 
 // NewRouter creates a new event router
@@ -152,6 +153,7 @@ func (r *Router) HandleIPCMessage(sessionID string, msg *ipc.IPCMessage) error {
 		return r.handlePermissionRequest(context.Background(), sessionID, &payload)
 
 	case ipc.TypePong:
+		r.ipcServer.RecordPong(sessionID)
 		log.Printf("Session %s pong received", sessionID)
 
 	default:
@@ -180,9 +182,11 @@ func (r *Router) handleStreamingReply(ctx context.Context, roomID, threadID, chu
 
 	if !exists {
 		// Start new streaming message
+		now := time.Now()
 		streamMsg = &StreamingMessage{
 			Content:     "",
-			LastUpdated: time.Now(),
+			LastUpdated: now,
+			CreatedAt:   now,
 		}
 		r.streamingEvents[key] = streamMsg
 	}
@@ -192,12 +196,13 @@ func (r *Router) handleStreamingReply(ctx context.Context, roomID, threadID, chu
 	currentContent := streamMsg.Content
 	eventID := streamMsg.EventID
 	lastUpdated := streamMsg.LastUpdated
-	r.streamMu.Unlock()
 
 	// Throttle updates to avoid rate limiting (update at most every 500ms)
 	if eventID != "" && time.Since(lastUpdated) < 500*time.Millisecond && !isFinal {
+		r.streamMu.Unlock()
 		return nil
 	}
+	r.streamMu.Unlock()
 
 	// Build display content with cursor indicator
 	displayContent := currentContent
@@ -210,6 +215,10 @@ func (r *Router) handleStreamingReply(ctx context.Context, roomID, threadID, chu
 		newEventID, err := r.client.SendLiveMessage(ctx, roomID, threadID, displayContent)
 		if err != nil {
 			log.Printf("Failed to send initial streaming message: %v", err)
+			// Clean up on error to avoid orphaned state
+			r.streamMu.Lock()
+			delete(r.streamingEvents, key)
+			r.streamMu.Unlock()
 			return err
 		}
 
@@ -224,6 +233,7 @@ func (r *Router) handleStreamingReply(ctx context.Context, roomID, threadID, chu
 		err := r.client.EditMessage(ctx, roomID, eventID, displayContent, !isFinal)
 		if err != nil {
 			log.Printf("Failed to edit streaming message: %v", err)
+			// Don't delete on edit failure - message still exists, just update failed
 		}
 
 		r.streamMu.Lock()
@@ -233,7 +243,7 @@ func (r *Router) handleStreamingReply(ctx context.Context, roomID, threadID, chu
 		r.streamMu.Unlock()
 	}
 
-	// Clean up if final
+	// Clean up if final (do this inside lock to prevent race)
 	if isFinal {
 		r.streamMu.Lock()
 		delete(r.streamingEvents, key)
@@ -280,11 +290,30 @@ func (r *Router) handlePermissionRequest(ctx context.Context, sessionID string, 
 		timeout := 60 * time.Second
 		select {
 		case allowed := <-resultChan:
-			r.sendPermissionVerdict(sessionID, req.RequestID, allowed)
+			// Check if permission was already cleaned up (e.g., by timeout)
+			r.permMu.Lock()
+			_, stillPending := r.pendingPerm[req.RequestID]
+			if stillPending {
+				delete(r.pendingPerm, req.RequestID)
+			}
+			r.permMu.Unlock()
+
+			if stillPending {
+				r.sendPermissionVerdict(sessionID, req.RequestID, allowed)
+			}
 		case <-time.After(timeout):
-			r.cleanupPendingPermission(req.RequestID)
-			r.client.SendMessage(ctx, req.RoomID, fmt.Sprintf("⏰ Permission request `%s` timed out (denied)", req.RequestID))
-			r.sendPermissionVerdict(sessionID, req.RequestID, false)
+			// Atomically check and remove to prevent double-verdict
+			r.permMu.Lock()
+			_, stillPending := r.pendingPerm[req.RequestID]
+			if stillPending {
+				delete(r.pendingPerm, req.RequestID)
+			}
+			r.permMu.Unlock()
+
+			if stillPending {
+				r.client.SendMessage(ctx, req.RoomID, fmt.Sprintf("⏰ Permission request `%s` timed out (denied)", req.RequestID))
+				r.sendPermissionVerdict(sessionID, req.RequestID, false)
+			}
 		}
 	}()
 
@@ -488,4 +517,29 @@ func (r *Router) waitForSession(ctx context.Context, sessionID string, timeout t
 // sendErrorReply sends an error message to Matrix
 func (r *Router) sendErrorReply(ctx context.Context, roomID, threadID, eventID, message string) {
 	r.client.SendReply(ctx, roomID, threadID, eventID, "⚠️ "+message, true)
+}
+
+// CleanupStaleState cleans up stale streaming messages and expired permissions
+func (r *Router) CleanupStaleState() {
+	now := time.Now()
+
+	// Clean up stale streaming messages (older than 30 minutes)
+	r.streamMu.Lock()
+	for key, msg := range r.streamingEvents {
+		if now.Sub(msg.CreatedAt) > 30*time.Minute {
+			log.Printf("Cleaning up stale streaming message: %s", key)
+			delete(r.streamingEvents, key)
+		}
+	}
+	r.streamMu.Unlock()
+
+	// Clean up expired permissions (older than 90 seconds - 30s buffer over timeout)
+	r.permMu.Lock()
+	for id, perm := range r.pendingPerm {
+		if now.Sub(perm.CreatedAt) > 90*time.Second {
+			log.Printf("Cleaning up expired permission: %s", id)
+			delete(r.pendingPerm, id)
+		}
+	}
+	r.permMu.Unlock()
 }
