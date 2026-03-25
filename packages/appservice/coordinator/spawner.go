@@ -433,29 +433,28 @@ func (s *Spawner) createBridgeWrapper(sessionID, roomID, threadID string) (strin
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
 	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", hash))
 
-	// Create wrapper script content with logging for debugging
-	// Redirect all output to stderr so Claude can capture it
-	// Also log to a file for debugging
+	// Create wrapper script content
+	// IMPORTANT: Do NOT pipe or redirect stdout - MCP requires bidirectional stdio
+	// Only redirect stderr to log file for debugging
 	logFile := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.log", hash))
 	script := fmt.Sprintf(`#!/bin/sh
 # Bridge wrapper script - created by coordinator
-# Log to both file and stderr for debugging
+# IMPORTANT: stdout must go directly to Claude for MCP protocol
+# Only stderr is redirected for debugging
 LOG_FILE="%s"
-echo "[$(date)] Bridge wrapper starting: session=%s" >> "$LOG_FILE" 2>&1
-echo "[$(date)] Bridge wrapper starting: session=%s" >&2
-echo "[$(date)] Bridge path: %s" >> "$LOG_FILE" 2>&1
-echo "[$(date)] Socket: %s" >> "$LOG_FILE" 2>&1
+echo "[$(date)] Bridge wrapper starting: session=%s" >> "$LOG_FILE"
+echo "[$(date)] Bridge path: %s" >> "$LOG_FILE"
+echo "[$(date)] Socket: %s" >> "$LOG_FILE"
 
 # Check if bridge binary exists
 if [ ! -x "%s" ]; then
-    echo "[$(date)] ERROR: Bridge binary not found or not executable: %s" >> "$LOG_FILE" 2>&1
-    echo "[$(date)] ERROR: Bridge binary not found or not executable: %s" >&2
+    echo "[$(date)] ERROR: Bridge binary not found or not executable: %s" >> "$LOG_FILE"
     exit 1
 fi
 
-# Execute bridge with all output logged
-exec %s --session-id %q --socket %q --room-id %q --thread-id %q 2>&1 | tee -a "$LOG_FILE"
-`, logFile, sessionID, sessionID, s.bridgePath, s.socketPath, s.bridgePath, s.bridgePath, s.bridgePath, s.bridgePath, sessionID, s.socketPath, roomID, threadID)
+# Execute bridge - stdout goes to Claude, stderr to log file
+exec %s --session-id %q --socket %q --room-id %q --thread-id %q 2>>"$LOG_FILE"
+`, logFile, sessionID, s.bridgePath, s.socketPath, s.bridgePath, s.bridgePath, s.bridgePath, sessionID, s.socketPath, roomID, threadID)
 
 	// Write the wrapper script
 	if err := os.WriteFile(wrapperPath, []byte(script), 0755); err != nil {
