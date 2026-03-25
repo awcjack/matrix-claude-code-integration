@@ -99,22 +99,30 @@ func (s *MCPServer) SetPermissionHandler(handler func(requestID, toolName, descr
 
 // Run starts the MCP server
 func (s *MCPServer) Run(ctx context.Context) error {
-	log.Printf("Bridge MCP server starting for session %s", s.sessionID)
+	log.Printf("===== Bridge MCP server Run() starting for session %s =====", s.sessionID)
+	log.Printf("MCP server name: %s, version: %s", s.name, s.version)
+	log.Printf("Reading from stdin, writing to stdout")
 
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("MCP server context cancelled")
 			return ctx.Err()
 		default:
 		}
 
+		log.Printf("Waiting for input from Claude...")
 		line, err := s.reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
+				log.Printf("MCP server received EOF on stdin")
 				return nil
 			}
+			log.Printf("MCP server read error: %v", err)
 			return fmt.Errorf("read error: %w", err)
 		}
+
+		log.Printf("MCP received line: %s", line)
 
 		if line == "" || line == "\n" {
 			continue
@@ -122,10 +130,11 @@ func (s *MCPServer) Run(ctx context.Context) error {
 
 		var req MCPRequest
 		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			log.Printf("Invalid JSON request: %v", err)
+			log.Printf("Invalid JSON request: %v, line: %s", err, line)
 			continue
 		}
 
+		log.Printf("MCP handling request: method=%s id=%v", req.Method, req.ID)
 		s.handleRequest(ctx, &req)
 	}
 }

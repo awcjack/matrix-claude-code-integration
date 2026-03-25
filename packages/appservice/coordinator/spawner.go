@@ -211,11 +211,17 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	// We provide an initial empty newline to prevent immediate exit.
 	channelArg := fmt.Sprintf("server:%s", wrapperPath)
 	log.Printf("Spawning Claude with channels: %s", channelArg)
+	// Use --input-format stream-json for receiving messages via stdin
+	// Keep stdin connected to prevent Claude from exiting
+	// The MCP channel server will handle actual message communication
 	cmd := exec.CommandContext(ctx, "claude",
 		"--dangerously-skip-permissions",
 		"--dangerously-load-development-channels",
 		"--channels", channelArg,
 		"--model", session.Config.Model,
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
 	)
 
 	// Set working directory
@@ -240,8 +246,8 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		fmt.Sprintf("BRIDGE_THREAD_ID=%s", threadID),
 	)
 
-	// Create stdin pipe to keep Claude running
-	// Without stdin connected, Claude may exit immediately or enter --print mode
+	// Create stdin pipe to keep Claude running with --input-format stream-json
+	// Without stdin connected, Claude may exit immediately
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
@@ -434,12 +440,28 @@ func (s *Spawner) createBridgeWrapper(sessionID, roomID, threadID string) (strin
 	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", hash))
 
 	// Create wrapper script content with logging for debugging
+	// Redirect all output to stderr so Claude can capture it
+	// Also log to a file for debugging
+	logFile := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.log", hash))
 	script := fmt.Sprintf(`#!/bin/sh
 # Bridge wrapper script - created by coordinator
-# Log to stderr for debugging (Claude captures stderr)
-echo "Bridge wrapper starting: session=%s" >&2
-exec %s --session-id %q --socket %q --room-id %q --thread-id %q
-`, sessionID, s.bridgePath, sessionID, s.socketPath, roomID, threadID)
+# Log to both file and stderr for debugging
+LOG_FILE="%s"
+echo "[$(date)] Bridge wrapper starting: session=%s" >> "$LOG_FILE" 2>&1
+echo "[$(date)] Bridge wrapper starting: session=%s" >&2
+echo "[$(date)] Bridge path: %s" >> "$LOG_FILE" 2>&1
+echo "[$(date)] Socket: %s" >> "$LOG_FILE" 2>&1
+
+# Check if bridge binary exists
+if [ ! -x "%s" ]; then
+    echo "[$(date)] ERROR: Bridge binary not found or not executable: %s" >> "$LOG_FILE" 2>&1
+    echo "[$(date)] ERROR: Bridge binary not found or not executable: %s" >&2
+    exit 1
+fi
+
+# Execute bridge with all output logged
+exec %s --session-id %q --socket %q --room-id %q --thread-id %q 2>&1 | tee -a "$LOG_FILE"
+`, logFile, sessionID, sessionID, s.bridgePath, s.socketPath, s.bridgePath, s.bridgePath, s.bridgePath, s.bridgePath, sessionID, s.socketPath, roomID, threadID)
 
 	// Write the wrapper script
 	if err := os.WriteFile(wrapperPath, []byte(script), 0755); err != nil {

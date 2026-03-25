@@ -8,8 +8,15 @@ import (
 	"os"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/anthropics/matrix-claude-code/appservice/bridge"
 )
+
+// isatty checks if stdin is a terminal
+func isatty() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
 
 func main() {
 	// Parse command-line flags (preferred) or fallback to environment variables
@@ -49,17 +56,34 @@ func main() {
 		log.Fatal("room-id flag or BRIDGE_ROOM_ID environment variable is required")
 	}
 
+	// Log to stderr so Claude Code can capture it
+	// Also log to a file for debugging
+	logFile, err := os.OpenFile("/tmp/matrix-bridge-debug.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err == nil {
+		log.SetOutput(logFile)
+		defer logFile.Close()
+	}
+
+	log.Printf("===== Bridge binary started =====")
 	log.Printf("Bridge starting: session=%s socket=%s room=%s thread=%s",
 		sessionID, socketPath, roomID, threadID)
+	log.Printf("Working directory: %s", func() string { d, _ := os.Getwd(); return d }())
+	log.Printf("PID: %d", os.Getpid())
+	log.Printf("Args: %v", os.Args)
+	log.Printf("Stdin isatty: %v", isatty())
 
 	// Wait for socket to be available with timeout
+	log.Printf("Waiting for socket at: %s", socketPath)
 	if err := waitForSocket(socketPath, 10*time.Second); err != nil {
 		log.Fatalf("Socket not available: %v", err)
 	}
+	log.Printf("Socket is available")
 
 	// Create and run bridge
+	log.Printf("Creating bridge instance...")
 	b := bridge.NewBridge(sessionID, socketPath, roomID, threadID)
 
+	log.Printf("Starting bridge Run()...")
 	if err := b.Run(); err != nil {
 		log.Fatalf("Bridge error: %v", err)
 	}
