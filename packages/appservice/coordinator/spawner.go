@@ -206,10 +206,12 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	//
 	// Note: We do NOT use --print mode because it exits after one turn.
 	// Instead, we use --resume which keeps the session alive for MCP channel communication.
+	channelArg := fmt.Sprintf("server:%s", wrapperPath)
+	log.Printf("Spawning Claude with channels: %s", channelArg)
 	cmd := exec.CommandContext(ctx, "claude",
 		"--dangerously-skip-permissions",
 		"--dangerously-load-development-channels",
-		"--channels", fmt.Sprintf("server:%s", wrapperPath),
+		"--channels", channelArg,
 		"--model", session.Config.Model,
 		"--resume",
 	)
@@ -415,16 +417,20 @@ func (s *Spawner) createBridgeWrapper(sessionID, roomID, threadID string) (strin
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
 	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", hash))
 
-	// Create wrapper script content
+	// Create wrapper script content with logging for debugging
 	script := fmt.Sprintf(`#!/bin/sh
+# Bridge wrapper script - created by coordinator
+# Log to stderr for debugging (Claude captures stderr)
+echo "Bridge wrapper starting: session=%s" >&2
 exec %s --session-id %q --socket %q --room-id %q --thread-id %q
-`, s.bridgePath, sessionID, s.socketPath, roomID, threadID)
+`, sessionID, s.bridgePath, sessionID, s.socketPath, roomID, threadID)
 
 	// Write the wrapper script
 	if err := os.WriteFile(wrapperPath, []byte(script), 0755); err != nil {
 		return "", fmt.Errorf("write wrapper script: %w", err)
 	}
 
+	log.Printf("Created bridge wrapper at %s for session %s", wrapperPath, sessionID)
 	return wrapperPath, nil
 }
 
