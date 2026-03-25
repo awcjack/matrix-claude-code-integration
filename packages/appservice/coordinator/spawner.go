@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/anthropics/matrix-claude-code/appservice/ipc"
@@ -70,12 +71,42 @@ func (s *Spawner) GetOrCreateSession(roomID, threadID string) (*Session, error) 
 	session, exists := s.sessions[sessionID]
 	s.mu.RUnlock()
 
-	if exists && session.Status == "ready" {
-		session.LastActive = time.Now()
-		return session, nil
+	if exists {
+		// Check if session is ready and process is still running
+		if session.Status == "ready" && s.isProcessAlive(session) {
+			session.LastActive = time.Now()
+			return session, nil
+		}
+		// If session is starting, check if it's been stuck too long
+		if session.Status == "starting" {
+			if time.Since(session.CreatedAt) > 60*time.Second {
+				log.Printf("Session %s stuck in starting state, cleaning up", sessionID)
+				s.mu.Lock()
+				s.cleanupSession(session)
+				delete(s.sessions, sessionID)
+				s.mu.Unlock()
+			} else {
+				// Still starting, return it so caller can wait
+				return session, nil
+			}
+		}
+		// Session is stopped/error/dead - will be cleaned up and respawned
+		if session.Status == "dead" {
+			log.Printf("Session %s is dead, respawning...", sessionID)
+		}
 	}
 
 	return s.SpawnSession(roomID, threadID)
+}
+
+// isProcessAlive checks if the session's process is still running
+func (s *Spawner) isProcessAlive(session *Session) bool {
+	if session.Process == nil || session.Process.Process == nil {
+		return false
+	}
+	// Check if process has exited by sending signal 0
+	err := session.Process.Process.Signal(syscall.Signal(0))
+	return err == nil
 }
 
 // SpawnSession creates a new bridge process for a session
@@ -156,17 +187,37 @@ func (s *Spawner) monitorProcess(session *Session) {
 		return
 	}
 
-	err := session.Process.Wait()
+	// Wait for process exit in a goroutine so we can also watch for context cancellation
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Process.Wait()
+	}()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	select {
+	case <-s.ctx.Done():
+		// Spawner is shutting down - kill the process if still running
+		if session.Process.Process != nil {
+			session.Process.Process.Kill()
+		}
+		<-done // Wait for process to exit
+		return
+	case err := <-done:
+		// Process exited naturally
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	if err != nil {
-		log.Printf("Session %s exited with error: %v", session.ID, err)
-		session.Status = "error"
-	} else {
-		log.Printf("Session %s exited cleanly", session.ID)
-		session.Status = "stopped"
+		// Check if session still exists (might have been cleaned up already)
+		if _, exists := s.sessions[session.ID]; !exists {
+			return
+		}
+
+		if err != nil {
+			log.Printf("Session %s exited with error: %v", session.ID, err)
+			session.Status = "error"
+		} else {
+			log.Printf("Session %s exited cleanly", session.ID)
+			session.Status = "stopped"
+		}
 	}
 }
 
@@ -288,4 +339,51 @@ func (s *Spawner) CleanupIdleSessions(maxIdle time.Duration) {
 			delete(s.sessions, id)
 		}
 	}
+}
+
+// HandleDeadSession handles a session that has been detected as dead by health check.
+// It marks the session for recovery so the next message will respawn it.
+func (s *Spawner) HandleDeadSession(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, exists := s.sessions[sessionID]
+	if !exists {
+		return
+	}
+
+	log.Printf("Session %s detected as dead, marking for recovery", sessionID)
+
+	// Clean up the dead process
+	if session.cancel != nil {
+		session.cancel()
+	}
+	if session.Process != nil && session.Process.Process != nil {
+		// Try to kill if still running
+		session.Process.Process.Kill()
+	}
+
+	// Mark as dead - next GetOrCreateSession will respawn
+	session.Status = "dead"
+	session.Process = nil
+}
+
+// RespawnDeadSession attempts to respawn a dead session immediately.
+// Returns the new session if successful.
+func (s *Spawner) RespawnDeadSession(sessionID string) (*Session, error) {
+	s.mu.RLock()
+	session, exists := s.sessions[sessionID]
+	s.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	if session.Status != "dead" {
+		return nil, fmt.Errorf("session %s is not dead (status: %s)", sessionID, session.Status)
+	}
+
+	// Respawn by calling SpawnSession which will clean up and create new
+	log.Printf("Respawning dead session %s for room %s", sessionID, session.RoomID)
+	return s.SpawnSession(session.RoomID, session.ThreadID)
 }
