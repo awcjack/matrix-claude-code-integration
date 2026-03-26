@@ -275,7 +275,8 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 	// --channels server:<path>: Connect to our bridge as MCP channel server
 	// --input-format stream-json: Accept JSON messages on stdin (keeps process alive)
 	// --output-format stream-json: Output JSON responses
-	// --system-prompt: Set the initial system context
+	// --append-system-prompt: Add custom instructions while keeping default Claude Code capabilities
+	//   (using --system-prompt would remove all default instructions)
 	cmd := exec.CommandContext(ctx, "claude",
 		"--dangerously-skip-permissions",
 		"--dangerously-load-development-channels",
@@ -283,7 +284,7 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 		"--model", session.Config.Model,
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
-		"--system-prompt", systemPrompt,
+		"--append-system-prompt", systemPrompt,
 		"--verbose",
 	)
 
@@ -330,6 +331,16 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 
 	session.Process = cmd
 	s.sessions[sessionID] = session
+
+	// Send initial message to stdin to start Claude Code
+	// With --input-format stream-json, Claude waits for a JSON message before doing anything
+	// Format: {"type": "user", "content": "message"}
+	initialMsg := fmt.Sprintf(`{"type":"user","content":%q}`, systemPrompt)
+	if _, err := stdinPipe.Write([]byte(initialMsg + "\n")); err != nil {
+		log.Printf("Warning: failed to send initial message: %v", err)
+	} else {
+		log.Printf("Sent initial system prompt to Claude stdin")
+	}
 
 	// Monitor process in background
 	go s.monitorProcess(session)
