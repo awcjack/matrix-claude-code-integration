@@ -340,11 +340,22 @@ set timeout -1
 spawn %s
 
 # Wait for and respond to the bypass permissions prompt
-# Option 2 is "Yes, I accept"
+# The prompt uses ink's select component - need to:
+# 1. Press down arrow to move to option 2 ("Yes, I accept")
+# 2. Press Enter to confirm
 expect {
-    "Enter to confirm" {
-        # Select option 2 (Yes, I accept) - press down arrow then Enter
-        send "\033\[B\r"
+    "No, exit" {
+        # Menu appeared, send down arrow to select option 2, then Enter
+        sleep 0.5
+        send "\x1b\[B"
+        sleep 0.2
+        send "\r"
+        exp_continue
+    }
+    "Yes, I accept" {
+        # Already on option 2 or confirmation, just press Enter
+        sleep 0.2
+        send "\r"
         exp_continue
     }
     eof {
