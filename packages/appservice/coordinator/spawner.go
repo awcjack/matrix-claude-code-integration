@@ -247,9 +247,7 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	// We provide an initial empty newline to prevent immediate exit.
 	channelArg := fmt.Sprintf("server:%s", wrapperPath)
 	log.Printf("Spawning Claude with channels: %s", channelArg)
-	// Use --print mode with a prompt to start Claude Code
-	// The MCP channel server will send messages via notifications/claude/channel
-	// Claude processes the initial prompt and then continues receiving channel messages
+
 	// System prompt for Matrix chat mode
 	// Important: Explain that channel tools are NOT discovered via ToolSearch - they are provided
 	// by the MCP channel server and can be called directly by name
@@ -267,15 +265,26 @@ To respond, use the 'reply' tool with these parameters:
 
 Wait for incoming Matrix messages and respond appropriately using the reply tool.`
 
+	// Use interactive mode with --input-format stream-json to keep Claude alive
+	// and listening for channel notifications. The --print mode exits after one response,
+	// but we need Claude to stay running to receive ongoing Matrix messages via the channel.
+	//
+	// Flags explained:
+	// --dangerously-skip-permissions: Required for non-interactive/headless mode
+	// --dangerously-load-development-channels: Required for custom channel servers
+	// --channels server:<path>: Connect to our bridge as MCP channel server
+	// --input-format stream-json: Accept JSON messages on stdin (keeps process alive)
+	// --output-format stream-json: Output JSON responses
+	// --system-prompt: Set the initial system context
 	cmd := exec.CommandContext(ctx, "claude",
-		"--print",
 		"--dangerously-skip-permissions",
 		"--dangerously-load-development-channels",
 		"--channels", channelArg,
 		"--model", session.Config.Model,
+		"--input-format", "stream-json",
 		"--output-format", "stream-json",
+		"--system-prompt", systemPrompt,
 		"--verbose",
-		systemPrompt,
 	)
 
 	// Set working directory
@@ -300,8 +309,15 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 		fmt.Sprintf("BRIDGE_THREAD_ID=%s", threadID),
 	)
 
-	// No stdin needed for --print mode - prompt is passed as argument
-	session.Stdin = nil
+	// Create stdin pipe to keep Claude alive
+	// With --input-format stream-json, Claude waits for JSON messages on stdin
+	// We keep the pipe open so Claude doesn't exit, and channel messages arrive via MCP
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("create stdin pipe: %w", err)
+	}
+	session.Stdin = stdinPipe
 
 	// Capture output for debugging
 	cmd.Stdout = os.Stdout
