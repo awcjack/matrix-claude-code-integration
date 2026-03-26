@@ -89,8 +89,9 @@ func (r *Router) HandleMatrixEvent(ctx context.Context, roomID, threadID, sender
 	}
 
 	// Wait for session to be ready (with timeout)
+	// Increased to 60s to allow time for Claude Code startup and MCP channel initialization
 	if session.Status != "ready" {
-		if err := r.waitForSession(ctx, session.ID, 30*time.Second); err != nil {
+		if err := r.waitForSession(ctx, session.ID, 60*time.Second); err != nil {
 			log.Printf("Session not ready: %v", err)
 			r.sendErrorReply(ctx, roomID, threadID, eventID, "Claude Code session is starting up, please wait...")
 			return err
