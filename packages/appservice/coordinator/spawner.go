@@ -309,15 +309,41 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 	//   claude --dangerously-load-development-channels server:<name>
 	// NOT:
 	//   claude --dangerously-load-development-channels --channels server:<name>
-	claudeScriptContent := fmt.Sprintf(`#!/bin/sh
-exec claude --dangerously-skip-permissions --dangerously-load-development-channels '%s' --model '%s' --append-system-prompt '%s' --verbose
+	//
+	// We use 'expect' to automatically respond to interactive prompts:
+	// 1. The bypass permissions warning ("Yes, I accept")
+	// 2. Any other confirmation prompts
+	//
+	// The expect script sends "2" (for option 2: "Yes, I accept") then Enter
+	claudeScriptContent := fmt.Sprintf(`#!/usr/bin/expect -f
+# Auto-accept prompts for headless operation
+set timeout -1
+
+spawn claude --dangerously-skip-permissions --dangerously-load-development-channels '%s' --model '%s' --append-system-prompt '%s' --verbose
+
+# Wait for and respond to the bypass permissions prompt
+# Option 2 is "Yes, I accept"
+expect {
+    "Enter to confirm" {
+        # Select option 2 (Yes, I accept) - press down arrow then Enter
+        send "\033\[B\r"
+        exp_continue
+    }
+    eof {
+        # Claude exited
+    }
+}
+
+# Keep waiting for more prompts or exit
+wait
 `, channelArg, session.Config.Model, strings.ReplaceAll(systemPrompt, "'", "'\"'\"'"))
 	if err := os.WriteFile(claudeScript, []byte(claudeScriptContent), 0755); err != nil {
 		cancel()
 		return nil, fmt.Errorf("write claude script: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "script", "-q", "/dev/null", "-c", claudeScript)
+	// Run the expect script directly - expect provides its own PTY
+	cmd := exec.CommandContext(ctx, claudeScript)
 
 	// Set working directory
 	if session.Config.WorkingDirectory != "" {
@@ -603,6 +629,59 @@ exec %s --session-id %q --socket %q --room-id %q --thread-id %q 2>>"$LOG_FILE"
 	return wrapperPath, nil
 }
 
+// ensureBypassPermissionsAccepted creates a ~/.claude/settings.json that pre-accepts
+// bypass permissions mode, preventing the interactive confirmation prompt.
+func (s *Spawner) ensureBypassPermissionsAccepted() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home directory: %w", err)
+	}
+
+	// Create ~/.claude directory if it doesn't exist
+	claudeDir := filepath.Join(homeDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("create ~/.claude directory: %w", err)
+	}
+
+	// Create settings.json with bypassPermissions accepted
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+
+	// Read existing settings or create new
+	var settings map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("read settings.json: %w", err)
+		}
+		settings = map[string]interface{}{}
+	} else {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("parse settings.json: %w", err)
+		}
+	}
+
+	// Ensure permissions section exists and set bypassPermissions mode
+	permissions, ok := settings["permissions"].(map[string]interface{})
+	if !ok {
+		permissions = map[string]interface{}{}
+		settings["permissions"] = permissions
+	}
+	permissions["defaultMode"] = "bypassPermissions"
+
+	// Write back settings.json
+	updatedData, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings.json: %w", err)
+	}
+
+	if err := os.WriteFile(settingsPath, updatedData, 0644); err != nil {
+		return fmt.Errorf("write settings.json: %w", err)
+	}
+
+	log.Printf("Configured bypassPermissions mode in %s", settingsPath)
+	return nil
+}
+
 // registerBridgeAsMCPServer registers the bridge wrapper as an MCP server in ~/.claude.json
 // This is required because Claude Code's --channels server:<name> flag requires the
 // MCP server to be configured in Claude's settings first.
@@ -613,6 +692,11 @@ func (s *Spawner) registerBridgeAsMCPServer(wrapperPath, sessionID, workDir stri
 	// Use a unique server name per session to avoid conflicts
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
 	serverName := fmt.Sprintf("matrix-bridge-%s", hash)
+
+	// Ensure bypassPermissions mode is pre-accepted to avoid interactive prompt
+	if err := s.ensureBypassPermissionsAccepted(); err != nil {
+		log.Printf("Warning: failed to pre-accept bypassPermissions: %v", err)
+	}
 
 	// Always use ~/.claude.json for global MCP server registration
 	// This ensures Claude Code finds the server regardless of working directory
