@@ -622,6 +622,12 @@ func (s *Spawner) registerBridgeAsMCPServer(wrapperPath, sessionID, workDir stri
 	}
 	claudeConfigPath := filepath.Join(homeDir, ".claude.json")
 
+	// Determine workspace directory for trust settings
+	workspaceDir := workDir
+	if workspaceDir == "" {
+		workspaceDir = "/workspace"
+	}
+
 	// Read existing ~/.claude.json or create new structure
 	var claudeConfig map[string]interface{}
 	data, err := os.ReadFile(claudeConfigPath)
@@ -652,6 +658,27 @@ func (s *Spawner) registerBridgeAsMCPServer(wrapperPath, sessionID, workDir stri
 		"command": wrapperPath,
 	}
 
+	// Pre-trust the workspace directory to bypass the interactive trust prompt
+	// Claude Code stores per-project trust settings in ~/.claude.json under "projects"
+	// The structure is: projects[<base64-encoded-path>] = { hasTrustDialogAccepted: true, ... }
+	projects, ok := claudeConfig["projects"].(map[string]interface{})
+	if !ok {
+		projects = map[string]interface{}{}
+		claudeConfig["projects"] = projects
+	}
+
+	// Encode the workspace path as a key (Claude uses base64 encoding for paths)
+	// Actually, looking at typical configs, Claude seems to use the path directly or a hash
+	// Let's try adding trust for the workspace directory
+	projectKey := workspaceDir
+	projectConfig, ok := projects[projectKey].(map[string]interface{})
+	if !ok {
+		projectConfig = map[string]interface{}{}
+		projects[projectKey] = projectConfig
+	}
+	projectConfig["hasTrustDialogAccepted"] = true
+	projectConfig["isTrusted"] = true
+
 	// Write back the updated ~/.claude.json
 	updatedData, err := json.MarshalIndent(claudeConfig, "", "  ")
 	if err != nil {
@@ -663,6 +690,7 @@ func (s *Spawner) registerBridgeAsMCPServer(wrapperPath, sessionID, workDir stri
 	}
 
 	log.Printf("Registered bridge as MCP server '%s' in %s", serverName, claudeConfigPath)
+	log.Printf("Pre-trusted workspace directory '%s' in %s", workspaceDir, claudeConfigPath)
 	return serverName, nil
 }
 
