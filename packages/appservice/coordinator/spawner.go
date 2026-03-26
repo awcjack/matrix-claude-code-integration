@@ -538,49 +538,47 @@ exec %s --session-id %q --socket %q --room-id %q --thread-id %q 2>>"$LOG_FILE"
 	return wrapperPath, nil
 }
 
-// registerBridgeAsMCPServer registers the bridge wrapper as an MCP server in .mcp.json
+// registerBridgeAsMCPServer registers the bridge wrapper as an MCP server in ~/.claude.json
 // This is required because Claude Code's --channels server:<name> flag requires the
-// MCP server to be configured in the project's .mcp.json file first.
+// MCP server to be configured in Claude's settings first.
+// We use ~/.claude.json (global config) to ensure the server is found regardless of
+// the current working directory.
 // Returns the server name to use with --channels server:<name>
 func (s *Spawner) registerBridgeAsMCPServer(wrapperPath, sessionID, workDir string) (string, error) {
 	// Use a unique server name per session to avoid conflicts
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
 	serverName := fmt.Sprintf("matrix-bridge-%s", hash)
 
-	// Determine the .mcp.json path - use working directory if set, otherwise home
-	var mcpPath string
-	if workDir != "" {
-		mcpPath = filepath.Join(workDir, ".mcp.json")
-	} else {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("get home directory: %w", err)
-		}
-		mcpPath = filepath.Join(homeDir, ".mcp.json")
+	// Always use ~/.claude.json for global MCP server registration
+	// This ensures Claude Code finds the server regardless of working directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("get home directory: %w", err)
 	}
+	claudeConfigPath := filepath.Join(homeDir, ".claude.json")
 
-	// Read existing .mcp.json or create new structure
-	var mcpConfig map[string]interface{}
-	data, err := os.ReadFile(mcpPath)
+	// Read existing ~/.claude.json or create new structure
+	var claudeConfig map[string]interface{}
+	data, err := os.ReadFile(claudeConfigPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return "", fmt.Errorf("read .mcp.json: %w", err)
+			return "", fmt.Errorf("read ~/.claude.json: %w", err)
 		}
 		// Create new config
-		mcpConfig = map[string]interface{}{
+		claudeConfig = map[string]interface{}{
 			"mcpServers": map[string]interface{}{},
 		}
 	} else {
-		if err := json.Unmarshal(data, &mcpConfig); err != nil {
-			return "", fmt.Errorf("parse .mcp.json: %w", err)
+		if err := json.Unmarshal(data, &claudeConfig); err != nil {
+			return "", fmt.Errorf("parse ~/.claude.json: %w", err)
 		}
 	}
 
 	// Ensure mcpServers key exists
-	mcpServers, ok := mcpConfig["mcpServers"].(map[string]interface{})
+	mcpServers, ok := claudeConfig["mcpServers"].(map[string]interface{})
 	if !ok {
 		mcpServers = map[string]interface{}{}
-		mcpConfig["mcpServers"] = mcpServers
+		claudeConfig["mcpServers"] = mcpServers
 	}
 
 	// Add our bridge server configuration
@@ -589,54 +587,49 @@ func (s *Spawner) registerBridgeAsMCPServer(wrapperPath, sessionID, workDir stri
 		"command": wrapperPath,
 	}
 
-	// Write back the updated .mcp.json
-	updatedData, err := json.MarshalIndent(mcpConfig, "", "  ")
+	// Write back the updated ~/.claude.json
+	updatedData, err := json.MarshalIndent(claudeConfig, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("marshal .mcp.json: %w", err)
+		return "", fmt.Errorf("marshal ~/.claude.json: %w", err)
 	}
 
-	if err := os.WriteFile(mcpPath, updatedData, 0644); err != nil {
-		return "", fmt.Errorf("write .mcp.json: %w", err)
+	if err := os.WriteFile(claudeConfigPath, updatedData, 0644); err != nil {
+		return "", fmt.Errorf("write ~/.claude.json: %w", err)
 	}
 
-	log.Printf("Registered bridge as MCP server '%s' in %s", serverName, mcpPath)
+	log.Printf("Registered bridge as MCP server '%s' in %s", serverName, claudeConfigPath)
 	return serverName, nil
 }
 
-// unregisterBridgeMCPServer removes the bridge MCP server entry from .mcp.json
+// unregisterBridgeMCPServer removes the bridge MCP server entry from ~/.claude.json
 // Called during session cleanup to avoid stale entries accumulating.
 func (s *Spawner) unregisterBridgeMCPServer(sessionID, workDir string) {
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
 	serverName := fmt.Sprintf("matrix-bridge-%s", hash)
 
-	// Determine the .mcp.json path
-	var mcpPath string
-	if workDir != "" {
-		mcpPath = filepath.Join(workDir, ".mcp.json")
-	} else {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			log.Printf("Failed to get home directory for cleanup: %v", err)
-			return
-		}
-		mcpPath = filepath.Join(homeDir, ".mcp.json")
+	// Always use ~/.claude.json (matching registerBridgeAsMCPServer)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("Failed to get home directory for cleanup: %v", err)
+		return
 	}
+	claudeConfigPath := filepath.Join(homeDir, ".claude.json")
 
-	// Read existing .mcp.json
-	data, err := os.ReadFile(mcpPath)
+	// Read existing ~/.claude.json
+	data, err := os.ReadFile(claudeConfigPath)
 	if err != nil {
 		// File doesn't exist, nothing to clean up
 		return
 	}
 
-	var mcpConfig map[string]interface{}
-	if err := json.Unmarshal(data, &mcpConfig); err != nil {
-		log.Printf("Failed to parse .mcp.json during cleanup: %v", err)
+	var claudeConfig map[string]interface{}
+	if err := json.Unmarshal(data, &claudeConfig); err != nil {
+		log.Printf("Failed to parse ~/.claude.json during cleanup: %v", err)
 		return
 	}
 
 	// Get mcpServers and remove our entry
-	mcpServers, ok := mcpConfig["mcpServers"].(map[string]interface{})
+	mcpServers, ok := claudeConfig["mcpServers"].(map[string]interface{})
 	if !ok {
 		return
 	}
@@ -647,19 +640,19 @@ func (s *Spawner) unregisterBridgeMCPServer(sessionID, workDir string) {
 
 	delete(mcpServers, serverName)
 
-	// Write back the updated .mcp.json
-	updatedData, err := json.MarshalIndent(mcpConfig, "", "  ")
+	// Write back the updated ~/.claude.json
+	updatedData, err := json.MarshalIndent(claudeConfig, "", "  ")
 	if err != nil {
-		log.Printf("Failed to marshal .mcp.json during cleanup: %v", err)
+		log.Printf("Failed to marshal ~/.claude.json during cleanup: %v", err)
 		return
 	}
 
-	if err := os.WriteFile(mcpPath, updatedData, 0644); err != nil {
-		log.Printf("Failed to write .mcp.json during cleanup: %v", err)
+	if err := os.WriteFile(claudeConfigPath, updatedData, 0644); err != nil {
+		log.Printf("Failed to write ~/.claude.json during cleanup: %v", err)
 		return
 	}
 
-	log.Printf("Unregistered bridge MCP server '%s' from %s", serverName, mcpPath)
+	log.Printf("Unregistered bridge MCP server '%s' from %s", serverName, claudeConfigPath)
 }
 
 // CleanupIdleSessions stops sessions that have been idle too long
