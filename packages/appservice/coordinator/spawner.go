@@ -265,27 +265,20 @@ To respond, use the 'reply' tool with these parameters:
 
 Wait for incoming Matrix messages and respond appropriately using the reply tool.`
 
-	// Use interactive mode with --input-format stream-json to keep Claude alive
-	// and listening for channel notifications. The --print mode exits after one response,
-	// but we need Claude to stay running to receive ongoing Matrix messages via the channel.
+	// Run Claude Code with script command to provide a PTY
+	// Channels require a true interactive session with a TTY.
+	// The 'script' command creates a PTY and keeps the session alive.
 	//
-	// Flags explained:
-	// --dangerously-skip-permissions: Required for non-interactive/headless mode
-	// --dangerously-load-development-channels: Required for custom channel servers
-	// --channels server:<path>: Connect to our bridge as MCP channel server
-	// --input-format stream-json: Accept JSON messages on stdin (keeps process alive)
-	// --output-format stream-json: Output JSON responses
-	// --append-system-prompt: Add custom instructions while keeping default Claude Code capabilities
-	//   (using --system-prompt would remove all default instructions)
-	cmd := exec.CommandContext(ctx, "claude",
-		"--dangerously-skip-permissions",
-		"--dangerously-load-development-channels",
-		"--channels", channelArg,
-		"--model", session.Config.Model,
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-		"--append-system-prompt", systemPrompt,
-		"--verbose",
+	// Architecture:
+	// 1. script -q /dev/null creates a PTY
+	// 2. Claude runs in interactive mode inside the PTY
+	// 3. Channel server (bridge) pushes messages via MCP notifications
+	// 4. Claude responds and the bridge sends replies back to Matrix
+	//
+	// We use /dev/null as the typescript file since we don't need to record
+	cmd := exec.CommandContext(ctx, "script", "-q", "/dev/null", "-c",
+		fmt.Sprintf("claude --dangerously-skip-permissions --dangerously-load-development-channels --channels %s --model %s --append-system-prompt %q --verbose",
+			channelArg, session.Config.Model, systemPrompt),
 	)
 
 	// Set working directory
@@ -310,9 +303,7 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 		fmt.Sprintf("BRIDGE_THREAD_ID=%s", threadID),
 	)
 
-	// Create stdin pipe to keep Claude alive
-	// With --input-format stream-json, Claude waits for JSON messages on stdin
-	// We keep the pipe open so Claude doesn't exit, and channel messages arrive via MCP
+	// Create stdin pipe to send input to Claude's interactive session
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
@@ -331,17 +322,6 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 
 	session.Process = cmd
 	s.sessions[sessionID] = session
-
-	// Send initial message to stdin to start Claude Code
-	// With --input-format stream-json, Claude expects NDJSON messages with this structure:
-	// {"type":"user","message":{"role":"user","content":"..."},"session_id":"..."}
-	initialMsg := fmt.Sprintf(`{"type":"user","message":{"role":"user","content":%q},"session_id":%q}`,
-		systemPrompt, sessionID)
-	if _, err := stdinPipe.Write([]byte(initialMsg + "\n")); err != nil {
-		log.Printf("Warning: failed to send initial message: %v", err)
-	} else {
-		log.Printf("Sent initial system prompt to Claude stdin")
-	}
 
 	// Monitor process in background
 	go s.monitorProcess(session)
