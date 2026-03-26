@@ -250,6 +250,23 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 	// Use --print mode with a prompt to start Claude Code
 	// The MCP channel server will send messages via notifications/claude/channel
 	// Claude processes the initial prompt and then continues receiving channel messages
+	// System prompt for Matrix chat mode
+	// Important: Explain that channel tools are NOT discovered via ToolSearch - they are provided
+	// by the MCP channel server and can be called directly by name
+	systemPrompt := `You are connected to a Matrix chat room via an MCP channel.
+
+IMPORTANT: The 'reply' tool is provided by the matrix-bridge channel server, NOT by ToolSearch.
+Do NOT use ToolSearch to find the reply tool - it will not be found there.
+Instead, call the 'reply' tool directly when you need to respond to messages.
+
+Messages from Matrix will arrive as channel notifications with room_id, sender, and thread_id metadata.
+To respond, use the 'reply' tool with these parameters:
+- room_id: The Matrix room ID (required)
+- text: Your response message (required)
+- thread_id: The thread ID if replying in a thread (optional)
+
+Wait for incoming Matrix messages and respond appropriately using the reply tool.`
+
 	cmd := exec.CommandContext(ctx, "claude",
 		"--print",
 		"--dangerously-skip-permissions",
@@ -258,7 +275,7 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		"--model", session.Config.Model,
 		"--output-format", "stream-json",
 		"--verbose",
-		"You are connected to Matrix chat. Wait for messages from the matrix channel and respond using the reply tool.",
+		systemPrompt,
 	)
 
 	// Set working directory
