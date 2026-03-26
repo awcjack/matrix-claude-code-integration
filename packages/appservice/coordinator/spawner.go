@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -285,10 +286,21 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 	// 4. Claude responds and the bridge sends replies back to Matrix
 	//
 	// We use /dev/null as the typescript file since we don't need to record
-	cmd := exec.CommandContext(ctx, "script", "-q", "/dev/null", "-c",
-		fmt.Sprintf("claude --dangerously-skip-permissions --dangerously-load-development-channels --channels %s --model %s --append-system-prompt %q --verbose",
-			channelArg, session.Config.Model, systemPrompt),
-	)
+	//
+	// IMPORTANT: We create a shell script to run Claude instead of passing
+	// the command directly to script -c, because the system prompt contains
+	// special characters that could be mangled by shell interpretation.
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
+	claudeScript := filepath.Join(os.TempDir(), fmt.Sprintf("claude-run-%s.sh", hash))
+	claudeScriptContent := fmt.Sprintf(`#!/bin/sh
+exec claude --dangerously-skip-permissions --dangerously-load-development-channels --channels '%s' --model '%s' --append-system-prompt '%s' --verbose
+`, channelArg, session.Config.Model, strings.ReplaceAll(systemPrompt, "'", "'\"'\"'"))
+	if err := os.WriteFile(claudeScript, []byte(claudeScriptContent), 0755); err != nil {
+		cancel()
+		return nil, fmt.Errorf("write claude script: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "script", "-q", "/dev/null", "-c", claudeScript)
 
 	// Set working directory
 	if session.Config.WorkingDirectory != "" {
@@ -463,12 +475,14 @@ func (s *Spawner) cleanupSession(session *Session) {
 	}
 	session.Status = "stopped"
 
-	// Clean up the wrapper script (use same hash as createBridgeWrapper)
+	// Clean up the wrapper script and claude script (use same hash as createBridgeWrapper)
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(session.ID)))[:16]
 	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", hash))
-	os.Remove(wrapperPath) // Ignore errors - file may not exist
+	claudeScript := filepath.Join(os.TempDir(), fmt.Sprintf("claude-run-%s.sh", hash))
+	os.Remove(wrapperPath)  // Ignore errors - file may not exist
+	os.Remove(claudeScript) // Ignore errors - file may not exist
 
-	// Clean up the MCP server entry from .mcp.json
+	// Clean up the MCP server entry from ~/.claude.json
 	s.unregisterBridgeMCPServer(session.ID, session.Config.WorkingDirectory)
 }
 
