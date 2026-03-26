@@ -346,16 +346,11 @@ set timeout -1
 spawn %s
 
 # Wait for Claude to exit - handle interactive prompts
+# Use interact to pass through all I/O after handling initial prompts
 expect {
-    "I am using this for local development" {
-        # Development channels warning - option 1 is already selected, just press Enter
-        sleep 0.3
-        send "\r"
-        exp_continue
-    }
-    "Enter to confirm" {
-        # Generic prompt - press Enter to confirm
-        sleep 0.3
+    -re "Enter to confirm.*Esc to cancel" {
+        # Prompt detected - wait a moment for UI to stabilize then press Enter
+        sleep 0.5
         send "\r"
         exp_continue
     }
