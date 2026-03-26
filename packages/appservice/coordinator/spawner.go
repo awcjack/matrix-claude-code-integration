@@ -224,6 +224,18 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		return nil, fmt.Errorf("read oauth token: %w", err)
 	}
 
+	// Ensure the working directory is a git repository
+	// Claude Code's workspace trust prompt only appears in non-git directories.
+	// By initializing git, we bypass the trust prompt in headless mode.
+	workDir := session.Config.WorkingDirectory
+	if workDir == "" {
+		workDir = "/workspace"
+	}
+	if err := s.ensureGitRepo(workDir); err != nil {
+		log.Printf("Warning: failed to ensure git repo in %s: %v", workDir, err)
+		// Continue anyway - the trust prompt will appear but may be handled
+	}
+
 	// Create a wrapper script for the bridge that includes session configuration
 	// This is needed because Claude Code spawns the channel server as a subprocess
 	// without inheriting the coordinator's environment variables.
@@ -514,6 +526,40 @@ func (s *Spawner) makeSessionID(roomID, threadID string) string {
 		return fmt.Sprintf("%s:%s", roomID, threadID)
 	}
 	return roomID
+}
+
+// ensureGitRepo initializes a git repository in the given directory if one doesn't exist.
+// This is needed because Claude Code's workspace trust prompt only appears in non-git
+// directories. By ensuring a git repo exists, we bypass the interactive trust prompt.
+func (s *Spawner) ensureGitRepo(dir string) error {
+	gitDir := filepath.Join(dir, ".git")
+	if _, err := os.Stat(gitDir); err == nil {
+		// .git already exists
+		return nil
+	}
+
+	// Initialize a new git repo
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git init failed: %w (output: %s)", err, string(output))
+	}
+
+	// Configure git user for the repo (required for commits)
+	cmd = exec.Command("git", "config", "user.email", "claude@matrix.local")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		log.Printf("Warning: failed to set git email: %v", err)
+	}
+
+	cmd = exec.Command("git", "config", "user.name", "Claude Code")
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		log.Printf("Warning: failed to set git name: %v", err)
+	}
+
+	log.Printf("Initialized git repository in %s to bypass workspace trust prompt", dir)
+	return nil
 }
 
 // createBridgeWrapper creates a shell script wrapper that launches the bridge
