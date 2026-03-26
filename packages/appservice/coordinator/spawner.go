@@ -340,24 +340,31 @@ exec claude --dangerously-load-development-channels '%s' --model '%s' --append-s
 	// - Any other confirmation prompts
 	claudeScriptContent := fmt.Sprintf(`#!/usr/bin/expect -f
 # Provide PTY for Claude Code headless operation
-set timeout -1
+
+# Log all output for debugging
+log_user 1
 
 # Spawn the shell script that launches claude
 spawn %s
 
-# Wait for Claude to exit - handle interactive prompts
-# Match on "Esc to cancel" which appears at the end of selection prompts
+# Handle the development channels warning prompt
+# Wait for the prompt to appear (look for Exit option which appears after the options are rendered)
+# The prompt uses a TUI with ANSI codes, so we wait for "Exit" text and then send Enter
+set timeout 30
 expect {
-    "Esc to cancel" {
-        # Prompt detected - wait a moment for UI to stabilize then press Enter
-        sleep 0.5
+    "Exit" {
+        # Options are rendered, wait for UI to stabilize then press Enter to select option 1
+        sleep 1
         send "\r"
-        exp_continue
     }
-    eof {
-        # Claude exited
+    timeout {
+        # No prompt appeared, continue
     }
 }
+
+# Now wait indefinitely for Claude to exit
+set timeout -1
+expect eof
 
 wait
 `, claudeShellScript)
