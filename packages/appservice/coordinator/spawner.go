@@ -311,7 +311,7 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 	//   claude --dangerously-load-development-channels --channels server:<name>
 	//
 	// We use 'expect' to automatically respond to interactive prompts:
-	// 1. The bypass permissions warning ("Yes, I accept")
+	// 1. The development channels warning ("I am using this for local development")
 	// 2. Any other confirmation prompts
 	//
 	// The expect script spawns a shell script that runs claude, to avoid
@@ -335,9 +335,9 @@ exec claude --dangerously-load-development-channels '%s' --model '%s' --append-s
 	// Now create the expect script that spawns the shell script
 	// This keeps Tcl from seeing the system prompt content
 	//
-	// With CLAUDE_CODE_SKIP_BYPASS_PERMISSIONS_PROMPT=1 set in the environment,
-	// the bypass permissions prompt is skipped. The expect script now just
-	// provides a PTY and handles any other potential prompts.
+	// The expect script provides a PTY and handles interactive prompts:
+	// - Development channels warning: select option 1 "I am using this for local development"
+	// - Any other confirmation prompts
 	claudeScriptContent := fmt.Sprintf(`#!/usr/bin/expect -f
 # Provide PTY for Claude Code headless operation
 set timeout -1
@@ -345,10 +345,17 @@ set timeout -1
 # Spawn the shell script that launches claude
 spawn %s
 
-# Wait for Claude to exit - handle any unexpected prompts
+# Wait for Claude to exit - handle interactive prompts
 expect {
+    "I am using this for local development" {
+        # Development channels warning - option 1 is already selected, just press Enter
+        sleep 0.3
+        send "\r"
+        exp_continue
+    }
     "Enter to confirm" {
         # Generic prompt - press Enter to confirm
+        sleep 0.3
         send "\r"
         exp_continue
     }
