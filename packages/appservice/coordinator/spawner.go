@@ -292,8 +292,13 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 	// special characters that could be mangled by shell interpretation.
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
 	claudeScript := filepath.Join(os.TempDir(), fmt.Sprintf("claude-run-%s.sh", hash))
+	// NOTE: The channel argument goes directly after --dangerously-load-development-channels,
+	// NOT as a separate --channels flag. The syntax is:
+	//   claude --dangerously-load-development-channels server:<name>
+	// NOT:
+	//   claude --dangerously-load-development-channels --channels server:<name>
 	claudeScriptContent := fmt.Sprintf(`#!/bin/sh
-exec claude --dangerously-skip-permissions --dangerously-load-development-channels --channels '%s' --model '%s' --append-system-prompt '%s' --verbose
+exec claude --dangerously-skip-permissions --dangerously-load-development-channels '%s' --model '%s' --append-system-prompt '%s' --verbose
 `, channelArg, session.Config.Model, strings.ReplaceAll(systemPrompt, "'", "'\"'\"'"))
 	if err := os.WriteFile(claudeScript, []byte(claudeScriptContent), 0755); err != nil {
 		cancel()
