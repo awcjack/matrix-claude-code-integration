@@ -346,9 +346,9 @@ set timeout -1
 spawn %s
 
 # Wait for Claude to exit - handle interactive prompts
-# Use interact to pass through all I/O after handling initial prompts
+# Match on "Esc to cancel" which appears at the end of selection prompts
 expect {
-    -re "Enter to confirm.*Esc to cancel" {
+    "Esc to cancel" {
         # Prompt detected - wait a moment for UI to stabilize then press Enter
         sleep 0.5
         send "\r"
