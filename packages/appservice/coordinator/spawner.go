@@ -314,12 +314,30 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 	// 1. The bypass permissions warning ("Yes, I accept")
 	// 2. Any other confirmation prompts
 	//
-	// The expect script sends "2" (for option 2: "Yes, I accept") then Enter
+	// The expect script spawns a shell script that runs claude, to avoid
+	// Tcl/expect interpreting special characters in the system prompt.
+	// The shell script is written separately with the system prompt properly escaped.
+
+	// First, write a shell script that launches claude with the system prompt
+	claudeShellScript := filepath.Join(os.TempDir(), fmt.Sprintf("claude-cmd-%s.sh", hash))
+	// Escape the system prompt for shell - replace single quotes with '\''
+	escapedPrompt := strings.ReplaceAll(systemPrompt, "'", "'\\''")
+	shellScriptContent := fmt.Sprintf(`#!/bin/bash
+exec claude --dangerously-skip-permissions --dangerously-load-development-channels '%s' --model '%s' --append-system-prompt '%s' --verbose
+`, channelArg, session.Config.Model, escapedPrompt)
+	if err := os.WriteFile(claudeShellScript, []byte(shellScriptContent), 0755); err != nil {
+		cancel()
+		return nil, fmt.Errorf("write claude shell script: %w", err)
+	}
+
+	// Now create the expect script that spawns the shell script
+	// This keeps Tcl from seeing the system prompt content
 	claudeScriptContent := fmt.Sprintf(`#!/usr/bin/expect -f
 # Auto-accept prompts for headless operation
 set timeout -1
 
-spawn claude --dangerously-skip-permissions --dangerously-load-development-channels '%s' --model '%s' --append-system-prompt '%s' --verbose
+# Spawn the shell script that launches claude
+spawn %s
 
 # Wait for and respond to the bypass permissions prompt
 # Option 2 is "Yes, I accept"
@@ -336,7 +354,7 @@ expect {
 
 # Keep waiting for more prompts or exit
 wait
-`, channelArg, session.Config.Model, strings.ReplaceAll(systemPrompt, "'", "'\"'\"'"))
+`, claudeShellScript)
 	if err := os.WriteFile(claudeScript, []byte(claudeScriptContent), 0755); err != nil {
 		cancel()
 		return nil, fmt.Errorf("write claude script: %w", err)
@@ -518,12 +536,14 @@ func (s *Spawner) cleanupSession(session *Session) {
 	}
 	session.Status = "stopped"
 
-	// Clean up the wrapper script and claude script (use same hash as createBridgeWrapper)
+	// Clean up the wrapper script and claude scripts (use same hash as createBridgeWrapper)
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(session.ID)))[:16]
 	wrapperPath := filepath.Join(os.TempDir(), fmt.Sprintf("matrix-bridge-%s.sh", hash))
 	claudeScript := filepath.Join(os.TempDir(), fmt.Sprintf("claude-run-%s.sh", hash))
-	os.Remove(wrapperPath)  // Ignore errors - file may not exist
-	os.Remove(claudeScript) // Ignore errors - file may not exist
+	claudeShellScript := filepath.Join(os.TempDir(), fmt.Sprintf("claude-cmd-%s.sh", hash))
+	os.Remove(wrapperPath)      // Ignore errors - file may not exist
+	os.Remove(claudeScript)     // Ignore errors - file may not exist
+	os.Remove(claudeShellScript) // Ignore errors - file may not exist
 
 	// Clean up the MCP server entry from ~/.claude.json
 	s.unregisterBridgeMCPServer(session.ID, session.Config.WorkingDirectory)
