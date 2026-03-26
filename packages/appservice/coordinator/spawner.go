@@ -333,9 +333,10 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 	s.sessions[sessionID] = session
 
 	// Send initial message to stdin to start Claude Code
-	// With --input-format stream-json, Claude waits for a JSON message before doing anything
-	// Format: {"type": "user", "content": "message"}
-	initialMsg := fmt.Sprintf(`{"type":"user","content":%q}`, systemPrompt)
+	// With --input-format stream-json, Claude expects NDJSON messages with this structure:
+	// {"type":"user","message":{"role":"user","content":"..."},"session_id":"..."}
+	initialMsg := fmt.Sprintf(`{"type":"user","message":{"role":"user","content":%q},"session_id":%q}`,
+		systemPrompt, sessionID)
 	if _, err := stdinPipe.Write([]byte(initialMsg + "\n")); err != nil {
 		log.Printf("Warning: failed to send initial message: %v", err)
 	} else {
