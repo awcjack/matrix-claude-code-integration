@@ -322,8 +322,10 @@ Wait for incoming Matrix messages and respond appropriately using the reply tool
 	claudeShellScript := filepath.Join(os.TempDir(), fmt.Sprintf("claude-cmd-%s.sh", hash))
 	// Escape the system prompt for shell - replace single quotes with '\''
 	escapedPrompt := strings.ReplaceAll(systemPrompt, "'", "'\\''")
+	// Note: We do NOT use --dangerously-skip-permissions because the Matrix bridge
+	// handles permissions interactively via !allow/!deny commands from users
 	shellScriptContent := fmt.Sprintf(`#!/bin/bash
-exec claude --dangerously-skip-permissions --dangerously-load-development-channels '%s' --model '%s' --append-system-prompt '%s' --verbose
+exec claude --dangerously-load-development-channels '%s' --model '%s' --append-system-prompt '%s' --verbose
 `, channelArg, session.Config.Model, escapedPrompt)
 	if err := os.WriteFile(claudeShellScript, []byte(shellScriptContent), 0755); err != nil {
 		cancel()
@@ -376,13 +378,11 @@ wait
 	//   when multiple Claude processes run concurrently
 	// - CLAUDE_CODE_HOST_PLATFORM: Override platform reported in telemetry
 	// - CLAUDE_CODE_ENTRYPOINT: Mark as standard CLI entrypoint
-	// - CLAUDE_CODE_SKIP_BYPASS_PERMISSIONS_PROMPT: Skip the interactive bypass permissions warning
 	// - BRIDGE_*: Internal variables for bridge IPC communication
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("CLAUDE_CODE_OAUTH_TOKEN=%s", oauthToken),
 		"CLAUDE_CODE_HOST_PLATFORM=linux",
 		"CLAUDE_CODE_ENTRYPOINT=cli",
-		"CLAUDE_CODE_SKIP_BYPASS_PERMISSIONS_PROMPT=1",
 		fmt.Sprintf("BRIDGE_SESSION_ID=%s", sessionID),
 		fmt.Sprintf("BRIDGE_IPC_SOCKET=%s", s.socketPath),
 		fmt.Sprintf("BRIDGE_ROOM_ID=%s", roomID),
@@ -653,59 +653,6 @@ exec %s --session-id %q --socket %q --room-id %q --thread-id %q 2>>"$LOG_FILE"
 	return wrapperPath, nil
 }
 
-// ensureBypassPermissionsAccepted creates a ~/.claude/settings.json that pre-accepts
-// bypass permissions mode, preventing the interactive confirmation prompt.
-func (s *Spawner) ensureBypassPermissionsAccepted() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home directory: %w", err)
-	}
-
-	// Create ~/.claude directory if it doesn't exist
-	claudeDir := filepath.Join(homeDir, ".claude")
-	if err := os.MkdirAll(claudeDir, 0755); err != nil {
-		return fmt.Errorf("create ~/.claude directory: %w", err)
-	}
-
-	// Create settings.json with bypassPermissions accepted
-	settingsPath := filepath.Join(claudeDir, "settings.json")
-
-	// Read existing settings or create new
-	var settings map[string]interface{}
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("read settings.json: %w", err)
-		}
-		settings = map[string]interface{}{}
-	} else {
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return fmt.Errorf("parse settings.json: %w", err)
-		}
-	}
-
-	// Ensure permissions section exists and set bypassPermissions mode
-	permissions, ok := settings["permissions"].(map[string]interface{})
-	if !ok {
-		permissions = map[string]interface{}{}
-		settings["permissions"] = permissions
-	}
-	permissions["defaultMode"] = "bypassPermissions"
-
-	// Write back settings.json
-	updatedData, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal settings.json: %w", err)
-	}
-
-	if err := os.WriteFile(settingsPath, updatedData, 0644); err != nil {
-		return fmt.Errorf("write settings.json: %w", err)
-	}
-
-	log.Printf("Configured bypassPermissions mode in %s", settingsPath)
-	return nil
-}
-
 // registerBridgeAsMCPServer registers the bridge wrapper as an MCP server in ~/.claude.json
 // This is required because Claude Code's --channels server:<name> flag requires the
 // MCP server to be configured in Claude's settings first.
@@ -716,11 +663,6 @@ func (s *Spawner) registerBridgeAsMCPServer(wrapperPath, sessionID, workDir stri
 	// Use a unique server name per session to avoid conflicts
 	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(sessionID)))[:16]
 	serverName := fmt.Sprintf("matrix-bridge-%s", hash)
-
-	// Ensure bypassPermissions mode is pre-accepted to avoid interactive prompt
-	if err := s.ensureBypassPermissionsAccepted(); err != nil {
-		log.Printf("Warning: failed to pre-accept bypassPermissions: %v", err)
-	}
 
 	// Always use ~/.claude.json for global MCP server registration
 	// This ensures Claude Code finds the server regardless of working directory
