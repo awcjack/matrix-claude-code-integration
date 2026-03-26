@@ -332,29 +332,21 @@ exec claude --dangerously-skip-permissions --dangerously-load-development-channe
 
 	// Now create the expect script that spawns the shell script
 	// This keeps Tcl from seeing the system prompt content
+	//
+	// With CLAUDE_CODE_SKIP_BYPASS_PERMISSIONS_PROMPT=1 set in the environment,
+	// the bypass permissions prompt is skipped. The expect script now just
+	// provides a PTY and handles any other potential prompts.
 	claudeScriptContent := fmt.Sprintf(`#!/usr/bin/expect -f
-# Auto-accept prompts for headless operation
+# Provide PTY for Claude Code headless operation
 set timeout -1
 
 # Spawn the shell script that launches claude
 spawn %s
 
-# Wait for and respond to the bypass permissions prompt
-# The prompt uses ink's select component - need to:
-# 1. Press down arrow to move to option 2 ("Yes, I accept")
-# 2. Press Enter to confirm
+# Wait for Claude to exit - handle any unexpected prompts
 expect {
-    "No, exit" {
-        # Menu appeared, send down arrow to select option 2, then Enter
-        sleep 0.5
-        send "\x1b\[B"
-        sleep 0.2
-        send "\r"
-        exp_continue
-    }
-    "Yes, I accept" {
-        # Already on option 2 or confirmation, just press Enter
-        sleep 0.2
+    "Enter to confirm" {
+        # Generic prompt - press Enter to confirm
         send "\r"
         exp_continue
     }
@@ -363,7 +355,6 @@ expect {
     }
 }
 
-# Keep waiting for more prompts or exit
 wait
 `, claudeShellScript)
 	if err := os.WriteFile(claudeScript, []byte(claudeScriptContent), 0755); err != nil {
@@ -385,11 +376,13 @@ wait
 	//   when multiple Claude processes run concurrently
 	// - CLAUDE_CODE_HOST_PLATFORM: Override platform reported in telemetry
 	// - CLAUDE_CODE_ENTRYPOINT: Mark as standard CLI entrypoint
+	// - CLAUDE_CODE_SKIP_BYPASS_PERMISSIONS_PROMPT: Skip the interactive bypass permissions warning
 	// - BRIDGE_*: Internal variables for bridge IPC communication
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("CLAUDE_CODE_OAUTH_TOKEN=%s", oauthToken),
 		"CLAUDE_CODE_HOST_PLATFORM=linux",
 		"CLAUDE_CODE_ENTRYPOINT=cli",
+		"CLAUDE_CODE_SKIP_BYPASS_PERMISSIONS_PROMPT=1",
 		fmt.Sprintf("BRIDGE_SESSION_ID=%s", sessionID),
 		fmt.Sprintf("BRIDGE_IPC_SOCKET=%s", s.socketPath),
 		fmt.Sprintf("BRIDGE_ROOM_ID=%s", roomID),
