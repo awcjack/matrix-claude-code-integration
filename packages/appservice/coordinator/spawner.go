@@ -4,7 +4,6 @@ package coordinator
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -18,76 +17,6 @@ import (
 
 	"github.com/anthropics/matrix-claude-code/appservice/ipc"
 )
-
-// ClaudeCredentials represents the structure of ~/.claude/.credentials.json
-type ClaudeCredentials struct {
-	ClaudeAiOauth *struct {
-		AccessToken      string   `json:"accessToken"`
-		RefreshToken     string   `json:"refreshToken"`
-		ExpiresAt        int64    `json:"expiresAt"`
-		Scopes           []string `json:"scopes,omitempty"`
-		SubscriptionType string   `json:"subscriptionType,omitempty"`
-		RateLimitTier    string   `json:"rateLimitTier,omitempty"`
-	} `json:"claudeAiOauth"`
-}
-
-// getCredentialsPath returns the path to ~/.claude/.credentials.json
-func getCredentialsPath() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home directory: %w", err)
-	}
-	return filepath.Join(homeDir, ".claude", ".credentials.json"), nil
-}
-
-// Note: Manual OAuth token refresh has been removed.
-// Claude Code handles its own token refresh internally when spawned.
-// If the token is expired, the user must run 'claude login' to re-authenticate.
-// Attempting to refresh manually with a hardcoded client ID is unreliable
-// as the client ID may change with Claude Code updates.
-
-// readClaudeOAuthToken reads the OAuth token from ~/.claude/.credentials.json
-// If the token is expired, it will attempt to refresh it using the refresh token
-func readClaudeOAuthToken() (string, error) {
-	credPath, err := getCredentialsPath()
-	if err != nil {
-		return "", err
-	}
-
-	log.Printf("Reading OAuth token from: %s", credPath)
-
-	data, err := os.ReadFile(credPath)
-	if err != nil {
-		return "", fmt.Errorf("read credentials file: %w", err)
-	}
-
-	var creds ClaudeCredentials
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return "", fmt.Errorf("parse credentials: %w", err)
-	}
-
-	if creds.ClaudeAiOauth == nil || creds.ClaudeAiOauth.AccessToken == "" {
-		return "", fmt.Errorf("no OAuth token found in credentials")
-	}
-
-	// Log token info (first/last 8 chars only for security)
-	token := creds.ClaudeAiOauth.AccessToken
-	if len(token) > 16 {
-		log.Printf("OAuth token loaded: %s...%s (expires: %d)", token[:8], token[len(token)-8:], creds.ClaudeAiOauth.ExpiresAt)
-	}
-
-	// Check if token is expired or about to expire (5 minute buffer)
-	// Note: We no longer attempt to refresh manually - Claude Code handles this internally.
-	// If expired, return an error prompting the user to re-login.
-	now := time.Now().UnixMilli()
-	bufferMs := int64(5 * 60 * 1000) // 5 minutes
-	if creds.ClaudeAiOauth.ExpiresAt > 0 && creds.ClaudeAiOauth.ExpiresAt < (now+bufferMs) {
-		log.Printf("OAuth token expired or expiring soon (expiresAt=%d, now=%d)", creds.ClaudeAiOauth.ExpiresAt, now)
-		return "", fmt.Errorf("OAuth token expired. Please run 'claude login' in the container to re-authenticate")
-	}
-
-	return creds.ClaudeAiOauth.AccessToken, nil
-}
 
 // SessionConfig holds configuration for a session
 type SessionConfig struct {
@@ -216,12 +145,16 @@ func (s *Spawner) SpawnSession(roomID, threadID string) (*Session, error) {
 		cancel:    cancel,
 	}
 
-	// Read OAuth token from ~/.claude/.credentials.json
-	// This prevents race conditions when multiple Claude processes access the credential store
-	oauthToken, err := readClaudeOAuthToken()
-	if err != nil {
+	// Read OAuth token from environment variable
+	// The token must be provided via CLAUDE_CODE_OAUTH_TOKEN environment variable
+	oauthToken := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN")
+	if oauthToken == "" {
 		cancel()
-		return nil, fmt.Errorf("read oauth token: %w", err)
+		return nil, fmt.Errorf("CLAUDE_CODE_OAUTH_TOKEN environment variable is not set")
+	}
+	// Log token info (first/last 8 chars only for security)
+	if len(oauthToken) > 16 {
+		log.Printf("OAuth token from env: %s...%s", oauthToken[:8], oauthToken[len(oauthToken)-8:])
 	}
 
 	// Ensure the working directory is a git repository
